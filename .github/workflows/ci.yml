@@ -26,3 +26,20 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+
+  docker-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Check Docker daemon
+        run: docker version
+      - name: Pull integration image
+        run: docker pull alpine:3.22
+      - name: Run Docker backend integration test
+        env:
+          SANDBOX_DOCKER_INTEGRATION: '1'
+        run: go test -race ./backend/docker -run TestDockerBackendIntegration -count=1

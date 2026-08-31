@@ -85,12 +85,13 @@ const (
 
 // ExecResult contains bounded output and execution metadata.
 type ExecResult struct {
-	ExitCode    int
-	Stdout      []byte
-	Stderr      []byte
-	StartedAt   time.Time
-	Duration    time.Duration
-	Termination TerminationReason
+	ExitCode        int
+	Stdout          []byte
+	Stderr          []byte
+	OutputTruncated bool
+	StartedAt       time.Time
+	Duration        time.Duration
+	Termination     TerminationReason
 }
 
 var ErrInvalidRequest = errors.New("invalid sandbox request")
