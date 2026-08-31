@@ -23,6 +23,7 @@ type fakeRunner struct {
 	mu          sync.Mutex
 	calls       []runnerCall
 	exitCode    string
+	oomKilled   bool
 	startOut    string
 	startErr    string
 	createError error
@@ -51,9 +52,16 @@ func (f *fakeRunner) run(ctx context.Context, env []string, stdout, stderr io.Wr
 		_, _ = io.WriteString(stdout, f.startOut)
 		_, _ = io.WriteString(stderr, f.startErr)
 	case "inspect":
-		_, _ = io.WriteString(stdout, f.exitCode+"\n")
+		_, _ = io.WriteString(stdout, f.exitCode+" "+boolString(f.oomKilled)+"\n")
 	}
 	return nil
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
 
 func (f *fakeRunner) snapshotCalls() []runnerCall {
@@ -111,6 +119,107 @@ func TestExecutePreservesWorkloadResult(t *testing.T) {
 	}
 	if calls[len(calls)-1].args[0] != "rm" {
 		t.Fatalf("last docker call = %q, want rm", calls[len(calls)-1].args[0])
+	}
+}
+
+func TestExecuteCompilesPartialResourceLimits(t *testing.T) {
+	fake := &fakeRunner{
+		exitCode: "0",
+		startOut: strings.Repeat("x", 8192),
+	}
+	backend := &Backend{image: "alpine:3.22", run: fake.run}
+
+	result, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "true",
+		Resources: sandbox.ResourceLimits{
+			MaxMemoryBytes: 64 << 20,
+			MaxProcesses:   16,
+			MaxOutputBytes: 4096,
+			MilliCPUs:      500,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !result.OutputTruncated {
+		t.Fatal("OutputTruncated = false, want true")
+	}
+	if got := len(result.Stdout) + len(result.Stderr); got != 4096 {
+		t.Fatalf("captured output = %d bytes, want 4096", got)
+	}
+
+	create := fake.snapshotCalls()[0]
+	joined := strings.Join(create.args, " ")
+	for _, want := range []string{
+		"--memory 67108864",
+		"--pids-limit 16",
+		"--cpus 0.500",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("docker create args %q missing %q", joined, want)
+		}
+	}
+}
+
+func TestExecuteKeepsSafeDefaultsForOmittedResourceFields(t *testing.T) {
+	fake := &fakeRunner{exitCode: "0"}
+	backend := &Backend{image: "alpine:3.22", run: fake.run}
+
+	_, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "true",
+		Resources: sandbox.ResourceLimits{
+			MaxMemoryBytes: 128 << 20,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	joined := strings.Join(fake.snapshotCalls()[0].args, " ")
+	for _, want := range []string{
+		"--memory 134217728",
+		"--pids-limit 64",
+		"--cpus 1.000",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("docker create args %q missing %q", joined, want)
+		}
+	}
+}
+
+func TestExecuteRejectsTooSmallDockerMemoryBeforeDocker(t *testing.T) {
+	fake := &fakeRunner{exitCode: "0"}
+	backend := &Backend{image: "alpine:3.22", run: fake.run}
+
+	_, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "true",
+		Resources: sandbox.ResourceLimits{
+			MaxMemoryBytes: minimumMemoryBytes - 1,
+		},
+	})
+	if !errors.Is(err, sandbox.ErrInvalidRequest) {
+		t.Fatalf("Execute() error = %v, want ErrInvalidRequest", err)
+	}
+	if calls := fake.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("docker was called before resource validation: %+v", calls)
+	}
+}
+
+func TestExecuteClassifiesOOMAsResourceLimit(t *testing.T) {
+	fake := &fakeRunner{exitCode: "137", oomKilled: true}
+	backend := &Backend{image: "alpine:3.22", run: fake.run}
+
+	result, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "memory-hog",
+		Resources: sandbox.ResourceLimits{
+			MaxMemoryBytes: 32 << 20,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if result.ExitCode != 137 || result.Termination != sandbox.TerminationResourceLimit {
+		t.Fatalf("Execute() result = %+v", result)
 	}
 }
 
@@ -222,5 +331,38 @@ func TestDockerBackendIntegration(t *testing.T) {
 	}
 	if readOnlyResult.ExitCode == 0 {
 		t.Fatal("read-only root filesystem unexpectedly allowed a write")
+	}
+
+	resourceResult, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "sh",
+		Args:    []string{"-c", `printf 'memory='; cat /sys/fs/cgroup/memory.max; printf 'pids='; cat /sys/fs/cgroup/pids.max; printf 'cpu='; cat /sys/fs/cgroup/cpu.max`},
+		Resources: sandbox.ResourceLimits{
+			MaxMemoryBytes: 64 << 20,
+			MaxProcesses:   16,
+			MilliCPUs:      500,
+		},
+	})
+	if err != nil {
+		t.Fatalf("resource-limited Execute() error = %v", err)
+	}
+	resourceOutput := string(resourceResult.Stdout)
+	for _, want := range []string{"memory=67108864\n", "pids=16\n", "cpu=50000 100000\n"} {
+		if !strings.Contains(resourceOutput, want) {
+			t.Fatalf("resource output %q missing %q", resourceOutput, want)
+		}
+	}
+
+	outputResult, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "sh",
+		Args:    []string{"-c", "yes x | head -c 65536"},
+		Resources: sandbox.ResourceLimits{
+			MaxOutputBytes: 4096,
+		},
+	})
+	if err != nil {
+		t.Fatalf("output-limited Execute() error = %v", err)
+	}
+	if !outputResult.OutputTruncated || len(outputResult.Stdout)+len(outputResult.Stderr) != 4096 {
+		t.Fatalf("output-limited result = %+v", outputResult)
 	}
 }

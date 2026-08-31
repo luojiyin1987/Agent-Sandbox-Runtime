@@ -25,22 +25,22 @@ const (
 	defaultProcesses      = 64
 	defaultMilliCPUs      = int64(1000)
 	defaultMaxOutputBytes = int64(1 << 20)
+	minimumMemoryBytes    = int64(6 << 20)
 	cleanupTimeout        = 5 * time.Second
 )
 
-// ErrUnsupportedPolicy is returned when PR2's baseline Docker backend cannot
-// yet enforce a requested policy. Unsupported policy is rejected rather than
-// silently downgraded.
+// ErrUnsupportedPolicy is returned when the Docker backend cannot yet enforce
+// a requested policy. Unsupported policy is rejected rather than silently
+// downgraded.
 var ErrUnsupportedPolicy = errors.New("docker backend does not support requested policy")
 
 type commandRunner func(ctx context.Context, env []string, stdout, stderr io.Writer, args ...string) error
 
 // Backend executes sandbox requests in Docker containers.
 //
-// The PR2 backend intentionally exposes only the fail-closed baseline policy.
-// Custom resource limits, writable filesystems, workspace mounts, temporary
-// filesystems, and network access are rejected until their policy compilers are
-// implemented in later changes.
+// Resource limits and timeout are compiled per request. Writable filesystems,
+// workspace mounts, temporary filesystems, and network access are still
+// rejected until their policy compilers are implemented in later changes.
 type Backend struct {
 	image string
 	run   commandRunner
@@ -87,6 +87,10 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 		finish()
 		return result, err
 	}
+	if err := validateResourceLimits(req.Resources); err != nil {
+		finish()
+		return result, err
+	}
 
 	timeout := req.Timeout
 	if timeout == 0 {
@@ -122,7 +126,8 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 		return result, errors.New("docker create returned an empty container ID")
 	}
 
-	capture := newOutputCapture(defaultMaxOutputBytes)
+	limits := effectiveResourceLimits(req.Resources)
+	capture := newOutputCapture(limits.MaxOutputBytes)
 	startErr := b.run(execCtx, nil, capture.stdoutWriter(), capture.stderrWriter(), "start", "--attach", name)
 	result.Stdout, result.Stderr, result.OutputTruncated = capture.snapshot()
 	finish()
@@ -131,7 +136,7 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 		return resultForContext(result, contextErr), contextErr
 	}
 
-	exitCode, inspectErr := b.inspectExitCode(name)
+	state, inspectErr := b.inspectState(name)
 	if inspectErr != nil {
 		if startErr != nil {
 			return result, fmt.Errorf("docker start failed: %w", startErr)
@@ -139,9 +144,13 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 		return result, inspectErr
 	}
 
-	result.ExitCode = exitCode
-	result.Termination = sandbox.TerminationCompleted
-	if startErr != nil && exitCode == 0 {
+	result.ExitCode = state.exitCode
+	if state.oomKilled {
+		result.Termination = sandbox.TerminationResourceLimit
+	} else {
+		result.Termination = sandbox.TerminationCompleted
+	}
+	if startErr != nil && state.exitCode == 0 {
 		result.Termination = sandbox.TerminationRuntimeError
 		return result, fmt.Errorf("docker start failed: %w", startErr)
 	}
@@ -159,10 +168,30 @@ func validateSupportedPolicy(req sandbox.ExecRequest) error {
 	if req.Filesystem.WorkspacePath != "" || req.Filesystem.WorkspaceReadOnly || req.Filesystem.TempDir {
 		return fmt.Errorf("%w: custom filesystem policy", ErrUnsupportedPolicy)
 	}
-	if req.Resources != (sandbox.ResourceLimits{}) {
-		return fmt.Errorf("%w: custom resource limits", ErrUnsupportedPolicy)
+	return nil
+}
+
+func validateResourceLimits(limits sandbox.ResourceLimits) error {
+	if limits.MaxMemoryBytes > 0 && limits.MaxMemoryBytes < minimumMemoryBytes {
+		return fmt.Errorf("%w: max memory must be at least %d bytes for Docker", sandbox.ErrInvalidRequest, minimumMemoryBytes)
 	}
 	return nil
+}
+
+func effectiveResourceLimits(limits sandbox.ResourceLimits) sandbox.ResourceLimits {
+	if limits.MaxMemoryBytes == 0 {
+		limits.MaxMemoryBytes = defaultMemoryBytes
+	}
+	if limits.MaxProcesses == 0 {
+		limits.MaxProcesses = defaultProcesses
+	}
+	if limits.MaxOutputBytes == 0 {
+		limits.MaxOutputBytes = defaultMaxOutputBytes
+	}
+	if limits.MilliCPUs == 0 {
+		limits.MilliCPUs = defaultMilliCPUs
+	}
+	return limits
 }
 
 func validateEnvironment(env map[string]string) error {
@@ -178,14 +207,15 @@ func validateEnvironment(env map[string]string) error {
 }
 
 func createArgs(name, image string, req sandbox.ExecRequest) []string {
+	limits := effectiveResourceLimits(req.Resources)
 	args := []string{
 		"create",
 		"--name", name,
 		"--network", "none",
 		"--read-only",
-		"--memory", strconv.FormatInt(defaultMemoryBytes, 10),
-		"--pids-limit", strconv.Itoa(defaultProcesses),
-		"--cpus", fmt.Sprintf("%.3f", float64(defaultMilliCPUs)/1000),
+		"--memory", strconv.FormatInt(limits.MaxMemoryBytes, 10),
+		"--pids-limit", strconv.Itoa(limits.MaxProcesses),
+		"--cpus", fmt.Sprintf("%.3f", float64(limits.MilliCPUs)/1000),
 	}
 
 	if req.WorkDir != "" {
@@ -234,21 +264,34 @@ func runDocker(ctx context.Context, env []string, stdout, stderr io.Writer, args
 	return cmd.Run()
 }
 
-func (b *Backend) inspectExitCode(name string) (int, error) {
+type containerState struct {
+	exitCode  int
+	oomKilled bool
+}
+
+func (b *Backend) inspectState(name string) (containerState, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := b.run(ctx, nil, &stdout, &stderr, "inspect", "--format", "{{.State.ExitCode}}", name); err != nil {
-		return 0, fmt.Errorf("docker inspect failed: %w", err)
+	if err := b.run(ctx, nil, &stdout, &stderr, "inspect", "--format", "{{.State.ExitCode}} {{.State.OOMKilled}}", name); err != nil {
+		return containerState{}, fmt.Errorf("docker inspect failed: %w", err)
 	}
 
-	exitCode, err := strconv.Atoi(strings.TrimSpace(stdout.String()))
-	if err != nil {
-		return 0, fmt.Errorf("parse docker exit code: %w", err)
+	fields := strings.Fields(stdout.String())
+	if len(fields) != 2 {
+		return containerState{}, fmt.Errorf("parse docker state: expected exit code and OOM flag, got %q", strings.TrimSpace(stdout.String()))
 	}
-	return exitCode, nil
+	exitCode, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return containerState{}, fmt.Errorf("parse docker exit code: %w", err)
+	}
+	oomKilled, err := strconv.ParseBool(fields[1])
+	if err != nil {
+		return containerState{}, fmt.Errorf("parse docker OOM flag: %w", err)
+	}
+	return containerState{exitCode: exitCode, oomKilled: oomKilled}, nil
 }
 
 func (b *Backend) removeContainer(name string) {
