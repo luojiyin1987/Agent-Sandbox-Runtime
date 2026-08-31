@@ -58,7 +58,7 @@ type RootFilesystemMode string
 
 const (
 	// RootReadOnly is the fail-closed default.
-	RootReadOnly RootFilesystemMode = "read-only"
+	RootReadOnly  RootFilesystemMode = "read-only"
 	RootReadWrite RootFilesystemMode = "read-write"
 )
 
