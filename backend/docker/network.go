@@ -3,6 +3,8 @@ package docker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 
@@ -20,7 +22,7 @@ func (b *Backend) prepareNetwork(ctx context.Context, mode sandbox.NetworkMode) 
 	case sandbox.NetworkNone:
 		return "none", func() {}, nil
 	case sandbox.NetworkOutbound:
-		name, err := randomName("agent-sandbox-net-")
+		name, err := networkName()
 		if err != nil {
 			return "", func() {}, fmt.Errorf("generate Docker network name: %w", err)
 		}
@@ -62,4 +64,12 @@ func (b *Backend) removeNetwork(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 	_ = b.run(ctx, io.Discard, io.Discard, "network", "rm", name)
+}
+
+func networkName() (string, error) {
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return "agent-sandbox-net-" + hex.EncodeToString(random[:]), nil
 }
