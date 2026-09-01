@@ -40,6 +40,7 @@ The zero-value policy is intentionally fail-closed:
 - network: `none`
 - root filesystem: `read-only`
 - omitted resource limits: backend-defined **safe defaults**, never unlimited
+- Docker process identity: runtime process effective UID/GID
 - Docker process privileges: all capabilities dropped, no-new-privileges enabled, built-in seccomp forced
 
 Invalid or unenforceable policy must be rejected instead of silently downgraded.
@@ -132,21 +133,25 @@ Networking has two independent gates: a trusted backend capability and the per-r
 Every Docker workload gets the same non-optional baseline:
 
 ```text
+--user <runtime-euid>:<runtime-egid>
 --cap-drop ALL
 --security-opt no-new-privileges=true
 --security-opt seccomp=builtin
 ```
 
-These controls are deliberately not request-configurable. An untrusted workload may request resources, workspace access, or an operator-enabled network mode, but it cannot ask the backend to add Linux capabilities, disable `no-new-privileges`, use `--privileged`, or run with `seccomp=unconfined`.
+The numeric process identity deliberately matches the trusted runtime process's effective UID/GID. This preserves ordinary Unix DAC semantics for writable bind-mounted workspaces without depending on root's `CAP_DAC_OVERRIDE`: the sandbox can write files the runtime identity could write, but dropping capabilities does not accidentally make a normal user-owned workspace unusable.
+
+These controls are deliberately not request-configurable. An untrusted workload may request resources, workspace access, or an operator-enabled network mode, but it cannot choose a different container user, ask the backend to add Linux capabilities, disable `no-new-privileges`, use `--privileged`, or run with `seccomp=unconfined`.
 
 Forcing `seccomp=builtin` is intentional: it prevents a daemon configured with a custom or unconfined default from silently weakening this runtime. The project does not vendor and fork Docker's default seccomp JSON because doing so could lag behind Docker security updates; custom syscall policy can be explored only when it preserves or tightens the current built-in baseline.
 
-Docker integration tests inspect `/proc/self/status` from inside the workload and require:
+Docker integration tests inspect the workload identity and `/proc/self/status` and require:
 
 ```text
-CapEff      0000000000000000
-NoNewPrivs  1
-Seccomp     2
+uid/gid     = runtime effective uid/gid
+CapEff      = 0000000000000000
+NoNewPrivs  = 1
+Seccomp     = 2
 ```
 
 They also verify privileged `mknod` and `mount` attempts fail. These checks prove the workload-visible state rather than only checking generated CLI arguments.
@@ -166,7 +171,7 @@ The backend also continues to enforce timeout/cancellation cleanup and bounded c
 3. ✅ resource and output limits
 4. ✅ filesystem isolation
 5. ✅ network isolation (`none` + opt-in broad outbound; allowlist remains fail-closed)
-6. ✅ syscall / capability baseline (`cap-drop ALL` + no-new-privileges + built-in seccomp)
+6. ✅ syscall / capability baseline (runtime UID/GID + `cap-drop ALL` + no-new-privileges + built-in seccomp)
 7. Linux Landlock experiments
 8. gVisor backend and shared conformance suite
 
