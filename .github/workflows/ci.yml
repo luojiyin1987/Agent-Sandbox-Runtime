@@ -44,6 +44,21 @@ jobs:
           SANDBOX_DOCKER_INTEGRATION: '1'
         run: go test -race ./backend/docker -run 'TestDocker.*Integration' -count=1
 
+  gvisor-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Install pinned gVisor runtime
+        run: bash .github/scripts/install-gvisor.sh
+      - name: Run gVisor shared conformance suite
+        env:
+          SANDBOX_GVISOR_INTEGRATION: '1'
+        run: go test -race ./backend/gvisor -run TestGVisorConformanceIntegration -count=1 -v
+
   landlock-integration:
     runs-on: ubuntu-latest
     steps:

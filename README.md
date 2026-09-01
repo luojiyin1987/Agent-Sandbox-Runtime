@@ -2,7 +2,7 @@
 
 A policy-driven runtime for executing untrusted Agent tool workloads under explicit resource, filesystem, network, and process boundaries.
 
-> Status: Docker execution backend with resource limits, filesystem isolation, opt-in outbound networking, and mandatory process hardening. A standalone Landlock experiment is available for evaluating an additional Linux LSM layer; it is not yet part of the Docker backend contract. Destination allowlists remain fail-closed.
+> Status: Docker and gVisor (`runsc`) execution backends share one runtime contract and backend-neutral conformance suite. Docker provides resource limits, filesystem isolation, opt-in outbound networking, and mandatory process hardening; gVisor reuses the same control plane while moving workload syscall handling behind its userspace application kernel. A standalone Landlock experiment remains separate from the backend contract. Destination allowlists remain fail-closed.
 
 ## Why
 
@@ -22,8 +22,11 @@ Sandbox Runtime API
       |
       v
 Execution Backend
-      +-- Docker   (resource + filesystem + network + process hardening)
-      +-- gVisor   (planned)
+      +-- Docker   (runc / daemon default)
+      +-- gVisor   (runsc application kernel)
+             |
+             +-- shared control-plane policy compilation
+             +-- shared backend-neutral conformance
 
 Standalone experiments
       +-- Landlock filesystem write confinement
@@ -159,6 +162,37 @@ Seccomp     = 2
 
 They also verify privileged `mknod` and `mount` attempts fail. These checks prove the workload-visible state rather than only checking generated CLI arguments.
 
+## gVisor backend
+
+The gVisor backend implements the same `sandbox.Runtime` interface but forces Docker to use the registered `runsc` OCI runtime:
+
+```go
+runtime, err := gvisor.New(
+    "alpine:3.22",
+    gvisor.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
+)
+```
+
+`backend/gvisor` deliberately does not copy the Docker lifecycle implementation. It reuses request validation, cleanup, resource flags, workspace validation, filesystem policy, network policy, environment transport, and output/timeout semantics, then adds trusted `--runtime runsc` selection.
+
+This matters because gVisor is not merely another seccomp profile. `runsc` places a userspace application kernel between the workload and the host kernel, reducing direct host-kernel syscall exposure while preserving the OCI/Docker integration model.
+
+The shared conformance suite in `internal/conformance` runs against both Docker and gVisor and verifies observable behavior rather than implementation internals:
+
+- result, environment, and working-directory semantics
+- timeout termination
+- bounded output
+- read-only root
+- writable and read-only workspaces
+- writable `/tmp` when requested
+- no default route under the zero-value network policy
+
+Docker-specific assertions such as host cgroup file values and workload-visible `/proc/self/status` seccomp fields remain Docker-specific. In particular, loading OCI seccomp filters inside a gVisor sandbox is controlled by runsc's `--oci-seccomp` runtime configuration; it is not treated as a cross-backend `/proc` invariant.
+
+CI pins gVisor `release-20260817.0`, verifies the release archive SHA256 before installation, registers `runsc` with Docker, performs a real `--runtime=runsc` preflight, and runs the full shared conformance suite.
+
+See [backend/gvisor/README.md](backend/gvisor/README.md) for the backend-specific boundary.
+
 ## Landlock experiment
 
 `experiments/landlock` evaluates whether Linux Landlock can add a second filesystem-write boundary without changing mount topology or weakening the existing Docker controls.
@@ -195,12 +229,12 @@ The backend also continues to enforce timeout/cancellation cleanup and bounded c
 4. ✅ filesystem isolation
 5. ✅ network isolation (`none` + opt-in broad outbound; allowlist remains fail-closed)
 6. ✅ syscall / capability baseline (runtime UID/GID + `cap-drop ALL` + no-new-privileges + built-in seccomp)
-7. ✅ Linux Landlock capability + confinement experiment (standalone; not yet backend enforcement)
-8. gVisor backend and shared conformance suite
+7. ✅ Linux Landlock capability + confinement experiment (standalone; not backend enforcement)
+8. ✅ gVisor backend + shared backend-neutral conformance suite
 
 ## Development
 
-Requires Go 1.26 or newer. Docker and Landlock integration tests are opt-in locally.
+Requires Go 1.26 or newer. Docker, gVisor, and Landlock integration tests are opt-in locally.
 
 ```sh
 gofmt -w .
@@ -208,6 +242,9 @@ go vet ./...
 go test -race ./...
 
 SANDBOX_DOCKER_INTEGRATION=1 go test -race ./backend/docker -run 'TestDocker.*Integration' -count=1
+
+# Requires a Docker runtime registered as "runsc"
+SANDBOX_GVISOR_INTEGRATION=1 go test -race ./backend/gvisor -run TestGVisorConformanceIntegration -count=1 -v
 
 # Linux kernel Landlock probe + standalone demo
 go run ./experiments/landlock probe
