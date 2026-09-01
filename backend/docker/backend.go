@@ -21,24 +21,31 @@ import (
 )
 
 const (
-	defaultTimeout        = 30 * time.Second
-	defaultMemoryBytes    = int64(256 << 20)
-	defaultProcesses      = 64
-	defaultMilliCPUs      = int64(1000)
-	defaultMaxOutputBytes = int64(1 << 20)
-	defaultTempDirBytes   = int64(64 << 20)
-	minimumMemoryBytes    = int64(6 << 20)
-	cleanupTimeout        = 5 * time.Second
-	containerWorkspace    = "/workspace"
-	containerTempDir      = "/tmp"
+	defaultTimeout         = 30 * time.Second
+	defaultMemoryBytes     = int64(256 << 20)
+	defaultProcesses       = 64
+	defaultMilliCPUs       = int64(1000)
+	defaultMaxOutputBytes  = int64(1 << 20)
+	defaultTempDirBytes    = int64(64 << 20)
+	minimumMemoryBytes     = int64(6 << 20)
+	cleanupTimeout         = 5 * time.Second
+	containerWorkspace     = "/workspace"
+	containerTempDir       = "/tmp"
+	executionResourceLabel = "agent-sandbox-runtime=execution"
 )
 
-// ErrUnsupportedPolicy is returned when the Docker backend cannot yet enforce
-// a requested policy. Unsupported policy is rejected rather than silently
-// downgraded.
-var ErrUnsupportedPolicy = errors.New("docker backend does not support requested policy")
+var (
+	// ErrUnsupportedPolicy is returned when the Docker backend cannot yet enforce
+	// a requested policy. Unsupported policy is rejected rather than silently
+	// downgraded.
+	ErrUnsupportedPolicy = errors.New("docker backend does not support requested policy")
+	// ErrCleanup marks a lifecycle failure where the runtime could not prove that
+	// an execution-owned Docker resource was removed before Execute returned.
+	ErrCleanup = errors.New("docker sandbox cleanup failed")
+)
 
 type commandRunner func(ctx context.Context, stdout, stderr io.Writer, args ...string) error
+type cleanupFunc func() error
 
 // Option configures trusted Docker backend state.
 type Option func(*Backend) error
@@ -118,12 +125,14 @@ func New(image string, options ...Option) (*Backend, error) {
 	return backend, nil
 }
 
-// Execute runs one request in a fresh Docker container and removes the
-// container before returning. A non-zero workload exit code is represented in
-// ExecResult and is not itself a runtime error.
-func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox.ExecResult, error) {
+// Execute runs one request in a fresh Docker container and removes all
+// execution-owned Docker resources before returning. A non-zero workload exit
+// code is represented in ExecResult and is not itself a runtime error. Cleanup
+// failures are returned because the runtime cannot otherwise prove terminal
+// containment.
+func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (result sandbox.ExecResult, retErr error) {
 	startedAt := time.Now()
-	result := sandbox.ExecResult{
+	result = sandbox.ExecResult{
 		ExitCode:    -1,
 		StartedAt:   startedAt,
 		Termination: sandbox.TerminationRuntimeError,
@@ -167,13 +176,15 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 	if err != nil {
 		finish()
 		if contextErr := execCtx.Err(); contextErr != nil {
-			return resultForContext(result, contextErr), contextErr
+			return resultForContext(result, contextErr), errors.Join(contextErr, err)
 		}
 		return result, err
 	}
 	// Register network cleanup before container cleanup so defer LIFO ordering
 	// always removes the container before removing its execution network.
-	defer cleanupNetwork()
+	defer func() {
+		applyCleanup(&result, &retErr, cleanupNetwork)
+	}()
 
 	name, err := containerName()
 	if err != nil {
@@ -184,7 +195,9 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 	// unknown result: the daemon may have created the named container even if
 	// the response never reached us. Removing by the already-known random name
 	// makes that path fail closed.
-	defer b.removeContainer(name)
+	defer func() {
+		applyCleanup(&result, &retErr, func() error { return b.removeContainer(name) })
+	}()
 
 	envFile, removeEnvFile, err := writeEnvironmentFile(req.Env)
 	if err != nil {
@@ -240,6 +253,18 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 	}
 
 	return result, nil
+}
+
+func applyCleanup(result *sandbox.ExecResult, retErr *error, cleanup cleanupFunc) {
+	if cleanup == nil {
+		return
+	}
+	if err := cleanup(); err != nil {
+		*retErr = errors.Join(*retErr, err)
+		if result.Termination == sandbox.TerminationCompleted {
+			result.Termination = sandbox.TerminationRuntimeError
+		}
+	}
 }
 
 func (b *Backend) validateSupportedPolicy(req sandbox.ExecRequest) error {
@@ -376,6 +401,7 @@ func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envF
 	args := []string{
 		"create",
 		"--name", name,
+		"--label", executionResourceLabel,
 		"--network", dockerNetwork,
 		"--read-only",
 		"--user", fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()),
@@ -451,10 +477,33 @@ func (b *Backend) inspectState(name string) (containerState, error) {
 	return containerState{exitCode: exitCode, oomKilled: oomKilled}, nil
 }
 
-func (b *Backend) removeContainer(name string) {
+func (b *Backend) removeContainer(name string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	_ = b.run(ctx, io.Discard, io.Discard, "rm", "--force", name)
+
+	var stderr bytes.Buffer
+	if err := b.run(ctx, io.Discard, &stderr, "rm", "--force", name); err != nil {
+		if dockerResourceMissing(stderr.String()) {
+			return nil
+		}
+		return fmt.Errorf("%w: remove container %q: %v%s", ErrCleanup, name, err, dockerErrorSuffix(stderr.String()))
+	}
+	return nil
+}
+
+func dockerResourceMissing(stderr string) bool {
+	message := strings.ToLower(stderr)
+	return strings.Contains(message, "no such container") ||
+		strings.Contains(message, "no such network") ||
+		strings.Contains(message, "not found")
+}
+
+func dockerErrorSuffix(stderr string) string {
+	message := strings.TrimSpace(stderr)
+	if message == "" {
+		return ""
+	}
+	return ": " + message
 }
 
 func containerName() (string, error) {
