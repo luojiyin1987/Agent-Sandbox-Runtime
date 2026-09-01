@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ func TestCreateArgsAlwaysHardensProcessPrivileges(t *testing.T) {
 	joined := strings.Join(args, " ")
 
 	for _, want := range []string{
+		fmt.Sprintf("--user %d:%d", os.Geteuid(), os.Getegid()),
 		"--cap-drop ALL",
 		"--security-opt no-new-privileges=true",
 		"--security-opt seccomp=builtin",
@@ -53,7 +55,7 @@ func TestDockerProcessHardeningIntegration(t *testing.T) {
 
 	statusResult, err := backend.Execute(context.Background(), sandbox.ExecRequest{
 		Command: "sh",
-		Args: []string{"-c", `awk '
+		Args: []string{"-c", `printf 'uid=%s gid=%s ' "$(id -u)" "$(id -g)"; awk '
 /^CapEff:/ { cap=$2 }
 /^NoNewPrivs:/ { nnp=$2 }
 /^Seccomp:/ { seccomp=$2 }
@@ -66,8 +68,13 @@ END { printf "cap=%s nnp=%s seccomp=%s", cap, nnp, seccomp }
 	if statusResult.ExitCode != 0 {
 		t.Fatalf("status result = %+v", statusResult)
 	}
-	if got, want := string(statusResult.Stdout), "cap=0000000000000000 nnp=1 seccomp=2"; got != want {
-		t.Fatalf("process security state = %q, want %q", got, want)
+	wantStatus := fmt.Sprintf(
+		"uid=%d gid=%d cap=0000000000000000 nnp=1 seccomp=2",
+		os.Geteuid(),
+		os.Getegid(),
+	)
+	if got := string(statusResult.Stdout); got != wantStatus {
+		t.Fatalf("process security state = %q, want %q", got, wantStatus)
 	}
 
 	mknodResult, err := backend.Execute(context.Background(), sandbox.ExecRequest{
