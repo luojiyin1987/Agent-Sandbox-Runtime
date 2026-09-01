@@ -2,7 +2,7 @@
 
 A policy-driven runtime for executing untrusted Agent tool workloads under explicit resource, filesystem, network, and process boundaries.
 
-> Status: Docker execution backend with per-request resource limits, filesystem isolation, and opt-in outbound networking. Destination allowlists remain fail-closed.
+> Status: Docker execution backend with resource limits, filesystem isolation, opt-in outbound networking, and mandatory process hardening. Destination allowlists remain fail-closed.
 
 ## Why
 
@@ -17,11 +17,12 @@ Sandbox Runtime API
       +-- resource policy
       +-- filesystem policy
       +-- network policy
+      +-- process hardening
       +-- timeout / cancellation
       |
       v
 Execution Backend
-      +-- Docker   (resource + filesystem + network modes)
+      +-- Docker   (resource + filesystem + network + process hardening)
       +-- gVisor   (planned)
 ```
 
@@ -39,6 +40,7 @@ The zero-value policy is intentionally fail-closed:
 - network: `none`
 - root filesystem: `read-only`
 - omitted resource limits: backend-defined **safe defaults**, never unlimited
+- Docker process privileges: all capabilities dropped, no-new-privileges enabled, built-in seccomp forced
 
 Invalid or unenforceable policy must be rejected instead of silently downgraded.
 
@@ -125,6 +127,30 @@ Networking has two independent gates: a trusted backend capability and the per-r
 
 `NetworkAllowlist` remains unsupported and returns `docker.ErrUnsupportedPolicy` before Docker is called, even when `WithOutboundNetwork()` is enabled. Docker bridge creation alone does not enforce destination filtering. A trustworthy allowlist needs an operator-controlled firewall or egress proxy with explicit DNS/address semantics; it must not silently degrade to unrestricted outbound access.
 
+### Process hardening
+
+Every Docker workload gets the same non-optional baseline:
+
+```text
+--cap-drop ALL
+--security-opt no-new-privileges=true
+--security-opt seccomp=builtin
+```
+
+These controls are deliberately not request-configurable. An untrusted workload may request resources, workspace access, or an operator-enabled network mode, but it cannot ask the backend to add Linux capabilities, disable `no-new-privileges`, use `--privileged`, or run with `seccomp=unconfined`.
+
+Forcing `seccomp=builtin` is intentional: it prevents a daemon configured with a custom or unconfined default from silently weakening this runtime. The project does not vendor and fork Docker's default seccomp JSON because doing so could lag behind Docker security updates; custom syscall policy can be explored only when it preserves or tightens the current built-in baseline.
+
+Docker integration tests inspect `/proc/self/status` from inside the workload and require:
+
+```text
+CapEff      0000000000000000
+NoNewPrivs  1
+Seccomp     2
+```
+
+They also verify privileged `mknod` and `mount` attempts fail. These checks prove the workload-visible state rather than only checking generated CLI arguments.
+
 ### Environment boundary
 
 Request environment variables are container data, not Docker control-plane configuration. They are written to a mode-`0600` temporary env file and passed with `docker create --env-file`; the file is deleted immediately after the create call returns.
@@ -140,7 +166,7 @@ The backend also continues to enforce timeout/cancellation cleanup and bounded c
 3. ✅ resource and output limits
 4. ✅ filesystem isolation
 5. ✅ network isolation (`none` + opt-in broad outbound; allowlist remains fail-closed)
-6. syscall / capability policy
+6. ✅ syscall / capability baseline (`cap-drop ALL` + no-new-privileges + built-in seccomp)
 7. Linux Landlock experiments
 8. gVisor backend and shared conformance suite
 
@@ -153,5 +179,5 @@ gofmt -w .
 go vet ./...
 go test -race ./...
 
-SANDBOX_DOCKER_INTEGRATION=1 go test -race ./backend/docker -run TestDockerBackendIntegration -count=1
+SANDBOX_DOCKER_INTEGRATION=1 go test -race ./backend/docker -run 'TestDocker.*Integration' -count=1
 ```
