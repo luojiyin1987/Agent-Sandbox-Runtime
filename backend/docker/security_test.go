@@ -48,7 +48,7 @@ func TestDockerProcessHardeningIntegration(t *testing.T) {
 		t.Skip("set SANDBOX_DOCKER_INTEGRATION=1 to run Docker integration test")
 	}
 
-	backend, err := New("alpine:3.22")
+	backend, err := New(testImageDigest)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}

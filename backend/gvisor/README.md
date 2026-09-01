@@ -4,12 +4,14 @@ The gVisor backend implements the same `sandbox.Runtime` contract as the Docker 
 
 ```go
 runtime, err := gvisor.New(
-    "alpine:3.22",
+    "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
     gvisor.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
 )
 ```
 
 The host must install gVisor and register a Docker runtime named `runsc` before constructing this backend. The project CI pins gVisor `release-20260817.0` and verifies the release archive checksum before installation.
+
+Like the Docker backend, gVisor requires the sandbox image to be pinned by `sha256` digest by default. A digest prevents a registry tag from silently resolving to different image content between executions or deployments. `WithMutableImageReference()` is an explicit trusted-operator escape hatch for development/compatibility workflows; it should not be used for the production security boundary. Digest pinning is configuration integrity, not provenance verification: it does not prove who built or signed the image.
 
 ## What is shared with Docker
 
@@ -24,6 +26,7 @@ The gVisor backend deliberately reuses the Docker control-plane implementation i
 - read-only root filesystem and bounded `/tmp` tmpfs
 - network `none` and the opt-in broad-outbound capability
 - runtime UID/GID, capability dropping, and no-new-privileges Docker configuration
+- immutable sandbox-image policy
 
 The only execution-engine difference is the trusted Docker runtime selection: gVisor always injects `--runtime runsc` into `docker create`.
 
@@ -61,4 +64,5 @@ Docker keeps additional implementation-specific integration tests for cgroup val
 - no KVM platform requirement; CI uses the default runsc platform
 - no request-controlled runsc flags or runtime name
 - no gVisor-specific network allowlist
+- no image-signature or provenance verification
 - no claim that a successful `dmesg` signature is a security-grade runtime attestation

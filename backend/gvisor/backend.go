@@ -10,8 +10,9 @@ import (
 const runtimeName = "runsc"
 
 type config struct {
-	workspaceRoot *string
-	allowOutbound bool
+	workspaceRoot     *string
+	allowOutbound     bool
+	allowMutableImage bool
 }
 
 // Option configures trusted gVisor backend state.
@@ -35,6 +36,15 @@ func WithOutboundNetwork() Option {
 	}
 }
 
+// WithMutableImageReference explicitly allows a trusted operator to configure
+// a mutable image tag. Production callers should keep the default immutable
+// sha256 digest requirement.
+func WithMutableImageReference() Option {
+	return func(cfg *config) {
+		cfg.allowMutableImage = true
+	}
+}
+
 // Backend executes the common sandbox contract through Docker while forcing
 // Docker to use the registered gVisor runsc OCI runtime.
 type Backend struct {
@@ -53,12 +63,15 @@ func New(image string, options ...Option) (*Backend, error) {
 		}
 	}
 
-	dockerOptions := make([]dockerbackend.Option, 0, 3)
+	dockerOptions := make([]dockerbackend.Option, 0, 4)
 	if cfg.workspaceRoot != nil {
 		dockerOptions = append(dockerOptions, dockerbackend.WithWorkspaceRoot(*cfg.workspaceRoot))
 	}
 	if cfg.allowOutbound {
 		dockerOptions = append(dockerOptions, dockerbackend.WithOutboundNetwork())
+	}
+	if cfg.allowMutableImage {
+		dockerOptions = append(dockerOptions, dockerbackend.WithMutableImageReference())
 	}
 	// Add runtime selection last so gVisor.New always forces runsc regardless
 	// of future trusted Docker options added above.

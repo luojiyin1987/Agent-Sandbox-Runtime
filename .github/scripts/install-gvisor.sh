@@ -5,6 +5,7 @@ release="release-20260817.0"
 archive="gvisor-x86_64.tar.bz2"
 sha256="ae345a8c1466586b3a163fb534301913da663a97b8ed446bc711b2e1963a32c5"
 url="https://github.com/google/gvisor/releases/download/${release}/${archive}"
+sandbox_image="alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
 
 curl -fsSL --retry 3 --retry-delay 2 -o "/tmp/${archive}" "${url}"
 printf '%s  %s\n' "${sha256}" "/tmp/${archive}" | sha256sum -c -
@@ -15,4 +16,4 @@ sudo systemctl restart docker
 
 /usr/local/bin/runsc --version
 docker info --format '{{json .Runtimes}}'
-docker run --rm --runtime=runsc alpine:3.22 true
+docker run --rm --runtime=runsc "${sandbox_image}" true

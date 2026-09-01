@@ -275,7 +275,7 @@ func TestExecuteCompilesFilesystemMounts(t *testing.T) {
 	}
 
 	fake := &fakeRunner{exitCode: "0"}
-	backend, err := New("alpine:3.22", WithWorkspaceRoot(root))
+	backend, err := New(testImageDigest, WithWorkspaceRoot(root))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -314,7 +314,7 @@ func TestExecuteCompilesWritableWorkspaceWithoutReadonlyFlag(t *testing.T) {
 	}
 
 	fake := &fakeRunner{exitCode: "0"}
-	backend, err := New("alpine:3.22", WithWorkspaceRoot(root))
+	backend, err := New(testImageDigest, WithWorkspaceRoot(root))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -364,7 +364,7 @@ func TestExecuteRejectsWorkspaceEscapes(t *testing.T) {
 		t.Fatalf("Symlink() error = %v", err)
 	}
 
-	backend, err := New("alpine:3.22", WithWorkspaceRoot(root))
+	backend, err := New(testImageDigest, WithWorkspaceRoot(root))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -497,7 +497,7 @@ func TestDockerBackendIntegration(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 
-	backend, err := New("alpine:3.22", WithWorkspaceRoot(workspaceRoot))
+	backend, err := New(testImageDigest, WithWorkspaceRoot(workspaceRoot))
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
