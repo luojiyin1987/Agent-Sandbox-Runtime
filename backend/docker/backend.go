@@ -362,7 +362,7 @@ func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envF
 	if workspacePath != "" {
 		mount := "type=bind,src=" + workspacePath + ",dst=" + containerWorkspace
 		if req.Filesystem.WorkspaceReadOnly {
-			mount += ",readonly,bind-recursive=readonly"
+			mount += ",readonly,bind-propagation=rprivate,bind-recursive=readonly"
 		}
 		args = append(args, "--mount", mount)
 	}
