@@ -101,7 +101,7 @@ func TestExecutePreservesTimeoutWhenCleanupAlsoFails(t *testing.T) {
 
 func TestExecuteReturnsNetworkCleanupFailureAfterContainerCleanup(t *testing.T) {
 	fake := &cleanupFailureRunner{networkRemoveErr: errors.New("network remove failed")}
-	backend, err := New("alpine:3.22", WithOutboundNetwork())
+	backend, err := New(testImageDigest, WithOutboundNetwork())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
