@@ -43,3 +43,22 @@ jobs:
         env:
           SANDBOX_DOCKER_INTEGRATION: '1'
         run: go test -race ./backend/docker -run 'TestDocker.*Integration' -count=1
+
+  landlock-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.x'
+          cache: false
+      - name: Show kernel
+        run: uname -a
+      - name: Probe Landlock
+        run: go run ./experiments/landlock probe
+      - name: Run standalone Landlock demo
+        run: go run ./experiments/landlock demo
+      - name: Run Landlock integration test
+        env:
+          SANDBOX_LANDLOCK_INTEGRATION: '1'
+        run: go test -race ./experiments/landlock -run TestLandlockConfinementIntegration -count=1
