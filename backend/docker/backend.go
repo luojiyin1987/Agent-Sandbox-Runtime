@@ -493,9 +493,10 @@ func (b *Backend) removeContainer(name string) error {
 
 func dockerResourceMissing(stderr string) bool {
 	message := strings.ToLower(stderr)
-	return strings.Contains(message, "no such container") ||
-		strings.Contains(message, "no such network") ||
-		strings.Contains(message, "not found")
+	if strings.Contains(message, "no such container") || strings.Contains(message, "no such network") {
+		return true
+	}
+	return strings.Contains(message, "network ") && strings.Contains(message, " not found")
 }
 
 func dockerErrorSuffix(stderr string) string {
