@@ -227,7 +227,7 @@ func TestDockerBackendIntegrationOutboundNetwork(t *testing.T) {
 	outboundResult, err := backend.Execute(context.Background(), sandbox.ExecRequest{
 		Command: "sh",
 		Args:    []string{"-c", `awk '$2=="00000000"{found=1} END{exit !found}' /proc/net/route`},
-		Network:  sandbox.NetworkPolicy{Mode: sandbox.NetworkOutbound},
+		Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkOutbound},
 	})
 	if err != nil {
 		t.Fatalf("NetworkOutbound Execute() error = %v", err)
