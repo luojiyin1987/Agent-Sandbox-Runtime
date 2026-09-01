@@ -22,7 +22,7 @@ The runtime is designed to contain common Agent-generated workload failures and 
 - unbounded stdout/stderr output
 - long-running or hung processes
 - privileged operations that depend on Linux capabilities
-- dangerous syscalls covered by Docker's built-in seccomp profile
+- dangerous syscalls covered by the selected backend's isolation layers
 - privilege escalation through setuid/setgid or file capabilities after process start
 - orphaned child processes after cancellation or timeout
 - workspace path traversal and symlink escape attempts
@@ -36,14 +36,15 @@ The runtime is designed to contain common Agent-generated workload failures and 
 4. **Cancellation is terminal.** A cancelled or timed-out execution must not keep child processes running.
 5. **Output is bounded.** Backends must cap captured stdout/stderr rather than allow unbounded memory growth.
 6. **No silent downgrade.** A backend must return an error when it cannot enforce a requested security boundary.
-7. **Backend details do not weaken the contract.** Docker, gVisor, or future backends must satisfy the same conformance semantics.
+7. **Backend details do not weaken the contract.** Docker, gVisor, or future backends must satisfy the same backend-neutral conformance semantics even when their internal kernel interfaces differ.
 8. **Workspace roots are capabilities.** An untrusted request may select only inside a trusted backend-configured workspace root; it cannot supply an arbitrary host bind source or container mount target.
 9. **Workload environment is data, not control-plane configuration.** Request environment variables must not be able to redirect or reconfigure the Docker client used by the trusted runtime.
 10. **Network access requires a trusted capability.** A request cannot grant itself Docker outbound access; the operator must explicitly enable that capability on the backend.
 11. **Broad outbound is not an allowlist.** A backend must never satisfy `NetworkAllowlist` by silently falling back to an unrestricted bridge network.
-12. **Process privilege hardening is non-optional.** Docker workloads run as the runtime's effective UID/GID with all Linux capabilities dropped, `no-new-privileges` enabled, and Docker's built-in seccomp profile explicitly selected. An untrusted request cannot relax those controls.
-13. **Security profiles must not stale-fork stronger upstream defaults.** The Docker backend does not vendor a frozen copy of Docker's built-in seccomp profile merely to customize it; any future syscall customization must preserve or tighten the then-current baseline.
+12. **Docker process privilege hardening is non-optional.** Docker-created workloads run as the runtime's effective UID/GID with all Linux capabilities dropped, `no-new-privileges` enabled, and Docker's built-in seccomp profile explicitly selected in the OCI configuration. An untrusted request cannot relax those controls.
+13. **Security profiles must not stale-fork stronger upstream defaults.** The Docker control plane does not vendor a frozen copy of Docker's built-in seccomp profile merely to customize it; any future syscall customization must preserve or tighten the then-current baseline.
 14. **Experiments are not backend guarantees.** A standalone security experiment does not strengthen the production runtime contract until its lifecycle, platform requirements, and conformance semantics are explicitly integrated and tested through the backend.
+15. **Backend identity is trusted configuration.** An `ExecRequest` cannot choose the OCI runtime. The gVisor backend fixes runtime selection to the operator-installed `runsc` runtime.
 
 ## Docker workspace assumptions
 
@@ -63,23 +64,39 @@ Each outbound execution gets a fresh user-defined bridge instead of the shared D
 
 `NetworkOutbound` is intentionally broad. It follows the Docker host's routing and firewall policy and can therefore include host-gateway, LAN, or other routed destinations. It must not be described or relied on as "internet only".
 
-Destination allowlists are not implemented by the current Docker backend. `NetworkAllowlist` fails closed before any Docker call. Enforcing destination policy safely requires a trusted egress firewall or proxy and explicit handling of DNS resolution, address changes, and bypass paths.
+Destination allowlists are not implemented by the current Docker or gVisor backend. `NetworkAllowlist` fails closed before any workload starts. Enforcing destination policy safely requires a trusted egress firewall or proxy and explicit handling of DNS resolution, address changes, and bypass paths.
 
 ## Docker process-hardening assumptions
 
-The Docker backend explicitly requests the runtime process's effective numeric UID/GID, `--cap-drop ALL`, `no-new-privileges=true`, and `seccomp=builtin` for every execution.
+The Docker control plane explicitly requests the runtime process's effective numeric UID/GID, `--cap-drop ALL`, `no-new-privileges=true`, and `seccomp=builtin` for every execution.
 
-Matching the runtime UID/GID keeps filesystem permission checks aligned with the trusted process that granted the workspace. This avoids retaining `CAP_DAC_OVERRIDE` just to make a normal user-owned bind mount writable. If the runtime itself runs as root, the sandbox receives UID 0 but still has an empty effective capability set and remains subject to `no-new-privileges`, seccomp, read-only root, and the other isolation layers.
+Matching the runtime UID/GID keeps filesystem permission checks aligned with the trusted process that granted the workspace. This avoids retaining `CAP_DAC_OVERRIDE` just to make a normal user-owned bind mount writable. If the runtime itself runs as root, the sandbox receives UID 0 but still has an empty effective capability set and remains subject to `no-new-privileges`, the selected OCI runtime, the read-only root, and the other isolation layers.
 
-Dropping all capabilities removes Docker's ordinary capability allowlist rather than trying to predict which privileged capability an Agent-generated command might abuse. `no-new-privileges` prevents a process from gaining privileges through exec-time mechanisms such as setuid/setgid binaries or file capabilities. Docker's built-in seccomp profile runs in filter mode and blocks a set of dangerous or rarely needed syscalls while retaining broad application compatibility.
+Dropping all capabilities removes Docker's ordinary capability allowlist rather than trying to predict which privileged capability an Agent-generated command might abuse. `no-new-privileges` prevents a process from gaining privileges through exec-time mechanisms such as setuid/setgid binaries or file capabilities. Under the normal Docker/runc backend, Docker's built-in seccomp profile runs in filter mode and blocks a set of dangerous or rarely needed syscalls while retaining broad application compatibility.
 
 These controls are defense in depth, not a VM-strength boundary. Seccomp only filters syscalls; capabilities govern privileged kernel operations; namespaces isolate selected kernel resources; filesystem and network policies constrain different surfaces. Passing one layer does not imply another layer is redundant.
 
 The runtime intentionally does not expose `--privileged`, capability additions, a request-selected container UID/GID, `seccomp=unconfined`, or a request-controlled seccomp profile. A custom seccomp JSON replaces Docker's built-in profile rather than extending it, so a stale vendored profile could accidentally lose later upstream hardening.
 
+## gVisor backend assumptions
+
+The gVisor backend uses the same trusted Docker control plane but forces container creation through a Docker runtime registered as `runsc`. The request cannot choose a different runtime name or pass arbitrary runsc flags.
+
+`runsc` implements an application kernel in userspace. Workload syscalls are handled by the gVisor Sentry instead of being passed directly to the host Linux kernel in the same way as a normal runc container. This reduces direct host-kernel attack surface, but it does not make mounts, network policy, resource limits, identity, cleanup, or host filesystem capabilities redundant.
+
+Host paths explicitly bind-mounted into a gVisor sandbox remain capabilities granted by the operator. The same workspace-root validation and read-only/read-write policy used by the Docker backend therefore remain part of the security boundary.
+
+The backend-neutral conformance suite verifies observable behavior across Docker and gVisor. It deliberately does not require identical `/proc`, cgroup filesystem, or other implementation-internal representations. A backend may satisfy the same contract through different kernel/runtime mechanisms.
+
+Docker still supplies its hardened OCI configuration when creating a runsc container, but workload-visible OCI seccomp behavior is not assumed to match runc. Loading OCI seccomp rules inside the gVisor sandbox is controlled separately by runsc's `--oci-seccomp` runtime configuration. gVisor also uses its own host-side isolation and seccomp mechanisms for its Sentry/runtime processes. Therefore Docker's `Seccomp=2` workload assertion remains a Docker/runc-specific integration check rather than a cross-backend invariant.
+
+The project CI pins and checksum-verifies a specific gVisor release before registering `runsc`, performs a real `--runtime=runsc` preflight, and runs the shared conformance suite. This proves the tested runtime path, but it is not cryptographic remote attestation and does not protect against a malicious host administrator replacing the runtime or Docker configuration.
+
+Like ordinary containers, gVisor is not claimed to be immune to implementation vulnerabilities, side channels, or attacks by a compromised host. It provides a stronger syscall isolation architecture than the normal Docker backend, not a promise equivalent to a hardware VM trust boundary.
+
 ## Landlock experiment boundary
 
-`experiments/landlock` is intentionally outside the Docker backend execution path. It evaluates Landlock as an additional Linux LSM restriction layer; it does not currently change `Runtime.Execute`, Docker create arguments, or the backend's documented production guarantees.
+`experiments/landlock` is intentionally outside both production backend execution paths. It evaluates Landlock as an additional Linux LSM restriction layer; it does not currently change `Runtime.Execute`, Docker create arguments, gVisor runtime configuration, or the backends' documented production guarantees.
 
 The experiment handles filesystem write and mutation rights only. It grants those rights beneath one selected hierarchy while leaving reads unhandled. This proves that Landlock can remove write rights from paths which remain visible to the process, but it is not a full replacement for the mount namespace, read-only mounts, Unix DAC, or the trusted workspace capability boundary.
 
@@ -87,19 +104,20 @@ The experiment requires Landlock ABI 3 or newer so `LANDLOCK_ACCESS_FS_WRITE_FIL
 
 Any future integration must also account for Landlock limitations that differ from mount isolation: file descriptors opened before enforcement retain their prior access properties, and current Landlock does not restrict every filesystem metadata action such as `chmod`, `chown`, `setxattr`, or `utime`.
 
-Because Landlock is stackable and monotonic, it can only reduce access. It cannot grant an operation already denied by Unix DAC, another LSM, seccomp/capability requirements, a read-only mount, or namespace topology. This makes it a possible defense-in-depth layer rather than a replacement for the controls already enforced by the Docker backend.
+Because Landlock is stackable and monotonic, it can only reduce access. It cannot grant an operation already denied by Unix DAC, another LSM, seccomp/capability requirements, a read-only mount, or namespace topology. This makes it a possible defense-in-depth layer rather than a replacement for the controls already enforced by the backends.
 
-## Out of scope for the initial Docker backend
+## Out of scope
 
-This project does **not** claim that a normal container is a VM-strength hostile multi-tenant security boundary. The initial backend does not promise protection against:
+This project does **not** claim protection against:
 
-- Linux kernel zero-days
+- Linux kernel zero-days or gVisor implementation vulnerabilities
 - container-runtime escape vulnerabilities
 - a compromised host kernel or container daemon
+- a malicious host administrator or replacement `runsc` registration
 - microarchitectural side channels
-- attacks by a malicious host administrator
+- VM-strength tenant isolation guarantees
 
-A later gVisor backend is intended to reduce direct exposure to the host-kernel syscall surface. VM-class isolation such as Kata Containers or Firecracker may be explored separately.
+VM-class isolation such as Kata Containers or Firecracker may be explored separately if the threat model requires a hardware-virtualization boundary.
 
 ## Trust boundaries
 
@@ -116,20 +134,29 @@ Sandbox Runtime control plane (trusted)
         +-- trusted workspace root
         +-- runtime effective UID/GID
         +-- trusted outbound-network capability
-        +-- mandatory process-hardening baseline
+        +-- mandatory Docker control-plane hardening
         +-- trusted Docker client environment
+        +-- backend-selected OCI runtime
         |
-        v
-Execution backend
-        |
-        v
-Sandboxed workload (untrusted)
+        +-----------------------+
+        |                       |
+        v                       v
+Docker / runc             Docker / runsc (gVisor)
+        |                       |
+        v                       v
+Linux container           gVisor application kernel
+        |                       |
+        +-----------+-----------+
+                    |
+                    v
+            Sandboxed workload
+               (untrusted)
 
 Standalone Landlock experiment
         |
         +-- probes running-kernel ABI
         +-- evaluates an extra LSM write boundary
-        +-- does not modify the backend contract yet
+        +-- does not modify either backend contract
 ```
 
 The runtime control plane must never treat workload-provided text as trusted configuration for the backend.
