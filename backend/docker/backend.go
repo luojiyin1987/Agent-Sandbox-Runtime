@@ -84,7 +84,9 @@ func WithWorkspaceRoot(root string) Option {
 // Backend executes sandbox requests in Docker containers.
 //
 // Resource limits, workspace mounts, a bounded /tmp tmpfs, network mode, and
-// timeout are compiled per request. The container root remains read-only.
+// timeout are compiled per request. The container root remains read-only and
+// every workload runs with all Linux capabilities dropped, no-new-privileges,
+// and Docker's built-in seccomp profile.
 type Backend struct {
 	image         string
 	workspaceRoot string
@@ -374,6 +376,9 @@ func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envF
 		"--name", name,
 		"--network", dockerNetwork,
 		"--read-only",
+		"--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges=true",
+		"--security-opt", "seccomp=builtin",
 		"--memory", strconv.FormatInt(limits.MaxMemoryBytes, 10),
 		"--pids-limit", strconv.Itoa(limits.MaxProcesses),
 		"--cpus", fmt.Sprintf("%.3f", float64(limits.MilliCPUs)/1000),
