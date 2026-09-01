@@ -96,22 +96,26 @@ func WithWorkspaceRoot(root string) Option {
 // capabilities dropped, no-new-privileges, and Docker's built-in seccomp
 // profile.
 type Backend struct {
-	image         string
-	workspaceRoot string
-	allowOutbound bool
-	run           commandRunner
+	image             string
+	workspaceRoot     string
+	allowOutbound     bool
+	allowMutableImage bool
+	run               commandRunner
 }
 
 var _ sandbox.Runtime = (*Backend)(nil)
 
-// New creates a Docker backend pinned to a trusted container image.
+// New creates a Docker backend pinned to a trusted container image. Image
+// references must use an immutable sha256 digest unless a trusted operator
+// explicitly opts into mutable references with WithMutableImageReference.
 func New(image string, options ...Option) (*Backend, error) {
-	if strings.TrimSpace(image) == "" {
+	image = strings.TrimSpace(image)
+	if image == "" {
 		return nil, fmt.Errorf("%w: docker image is required", sandbox.ErrInvalidRequest)
 	}
 
 	backend := &Backend{
-		image: strings.TrimSpace(image),
+		image: image,
 		run:   runDocker,
 	}
 	for _, option := range options {
@@ -121,6 +125,9 @@ func New(image string, options ...Option) (*Backend, error) {
 		if err := option(backend); err != nil {
 			return nil, err
 		}
+	}
+	if err := validateImageReference(backend.image, backend.allowMutableImage); err != nil {
+		return nil, err
 	}
 	return backend, nil
 }
