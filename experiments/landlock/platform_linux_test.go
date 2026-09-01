@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -72,7 +73,7 @@ func TestLandlockConfinementIntegration(t *testing.T) {
 	output, err := cmd.Output()
 	if err != nil {
 		var exitErr *exec.ExitError
-		if ok := errorAs(err, &exitErr); ok {
+		if errors.As(err, &exitErr) {
 			t.Fatalf("Landlock helper error = %v, stderr = %s", err, exitErr.Stderr)
 		}
 		t.Fatalf("Landlock helper error = %v", err)
@@ -108,8 +109,4 @@ func TestLandlockChildHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	os.Exit(0)
-}
-
-func errorAs(err error, target any) bool {
-	return errorsAs(err, target)
 }
