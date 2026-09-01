@@ -23,6 +23,8 @@ The runtime is designed to contain common Agent-generated workload failures and 
 - long-running or hung processes
 - privileged operations and dangerous syscalls when the backend can enforce them
 - orphaned child processes after cancellation or timeout
+- workspace path traversal and symlink escape attempts
+- workload environment variables attempting to alter Docker client configuration
 
 ## Security invariants
 
@@ -33,6 +35,16 @@ The runtime is designed to contain common Agent-generated workload failures and 
 5. **Output is bounded.** Backends must cap captured stdout/stderr rather than allow unbounded memory growth.
 6. **No silent downgrade.** A backend must return an error when it cannot enforce a requested security boundary.
 7. **Backend details do not weaken the contract.** Docker, gVisor, or future backends must satisfy the same conformance semantics.
+8. **Workspace roots are capabilities.** An untrusted request may select only inside a trusted backend-configured workspace root; it cannot supply an arbitrary host bind source or container mount target.
+9. **Workload environment is data, not control-plane configuration.** Request environment variables must not be able to redirect or reconfigure the Docker client used by the trusted runtime.
+
+## Docker workspace assumptions
+
+The trusted operator must configure `WithWorkspaceRoot` as the smallest host directory the workload is allowed to access. Everything beneath that root is considered granted according to the selected read-only/read-write mode.
+
+The current Docker bind-mount implementation validates paths and symlinks against the local host filesystem. Therefore filesystem isolation with a workspace assumes the Docker daemon runs on the same host as the runtime process. Remote Docker contexts are not part of the supported workspace threat model.
+
+Read-only workspaces request recursive read-only bind semantics. A host that cannot enforce that boundary must fail container creation rather than expose writable nested mounts.
 
 ## Out of scope for the initial Docker backend
 
@@ -56,6 +68,10 @@ ExecRequest + policy validation
         |
         v
 Sandbox Runtime control plane (trusted)
+        |
+        +-- trusted image
+        +-- trusted workspace root
+        +-- trusted Docker client environment
         |
         v
 Execution backend

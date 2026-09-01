@@ -31,6 +31,7 @@ func TestExecRequestValidation(t *testing.T) {
 		{name: "empty allowlist", req: ExecRequest{Command: "true", Network: NetworkPolicy{Mode: NetworkAllowlist}}},
 		{name: "unknown network mode", req: ExecRequest{Command: "true", Network: NetworkPolicy{Mode: "host"}}},
 		{name: "unknown filesystem mode", req: ExecRequest{Command: "true", Filesystem: FilesystemPolicy{Root: "host"}}},
+		{name: "readonly workspace without path", req: ExecRequest{Command: "true", Filesystem: FilesystemPolicy{WorkspaceReadOnly: true}}},
 	}
 
 	for _, tt := range tests {
@@ -59,7 +60,7 @@ func TestExecRequestAllowsExplicitPolicies(t *testing.T) {
 		},
 		Filesystem: FilesystemPolicy{
 			Root:              RootReadOnly,
-			WorkspacePath:     "/workspace",
+			WorkspacePath:     "workspace",
 			WorkspaceReadOnly: false,
 			TempDir:           true,
 		},

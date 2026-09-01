@@ -63,7 +63,9 @@ const (
 )
 
 // FilesystemPolicy controls the sandbox root and optional workspace.
-// An empty Root value is equivalent to RootReadOnly.
+// An empty Root value is equivalent to RootReadOnly. WorkspacePath is a
+// backend-relative selector inside a trusted workspace root; it must never be
+// interpreted as permission to mount an arbitrary host path.
 type FilesystemPolicy struct {
 	Root              RootFilesystemMode
 	WorkspacePath     string
@@ -106,6 +108,9 @@ func (r ExecRequest) Validate() error {
 	}
 	if r.Resources.MaxMemoryBytes < 0 || r.Resources.MaxProcesses < 0 || r.Resources.MaxOutputBytes < 0 || r.Resources.MilliCPUs < 0 {
 		return fmt.Errorf("%w: resource limits must not be negative", ErrInvalidRequest)
+	}
+	if r.Filesystem.WorkspaceReadOnly && r.Filesystem.WorkspacePath == "" {
+		return fmt.Errorf("%w: workspace read-only requires a workspace path", ErrInvalidRequest)
 	}
 
 	switch r.Network.Mode {

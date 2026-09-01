@@ -2,7 +2,7 @@
 
 A policy-driven runtime for executing untrusted Agent tool workloads under explicit resource, filesystem, network, and process boundaries.
 
-> Status: Docker execution backend with per-request resource, timeout, and output limits. Filesystem and network policy expansion remain fail-closed and are planned in later changes.
+> Status: Docker execution backend with per-request resource limits and filesystem isolation. Network expansion remains fail-closed and is planned next.
 
 ## Why
 
@@ -21,7 +21,7 @@ Sandbox Runtime API
       |
       v
 Execution Backend
-      +-- Docker   (resource limits available)
+      +-- Docker   (resource + filesystem isolation available)
       +-- gVisor   (planned)
 ```
 
@@ -61,14 +61,18 @@ import (
 )
 
 func main() {
-    runtime, err := dockerbackend.New("alpine:3.22")
+    runtime, err := dockerbackend.New(
+        "alpine:3.22",
+        dockerbackend.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
+    )
     if err != nil {
         panic(err)
     }
 
     result, err := runtime.Execute(context.Background(), sandbox.ExecRequest{
         Command: "sh",
-        Args:    []string{"-c", "printf hello"},
+        Args:    []string{"-c", "cat input.txt; printf done > output.txt"},
+        WorkDir: "/workspace",
         Timeout: 5 * time.Second,
         Resources: sandbox.ResourceLimits{
             MaxMemoryBytes: 128 << 20,
@@ -76,10 +80,16 @@ func main() {
             MaxOutputBytes: 256 << 10,
             MilliCPUs:      500,
         },
+        Filesystem: sandbox.FilesystemPolicy{
+            WorkspacePath: ".",
+            TempDir:       true,
+        },
     })
     fmt.Printf("exit=%d stdout=%q err=%v\n", result.ExitCode, result.Stdout, err)
 }
 ```
+
+### Resource limits
 
 Resource fields are independent overrides. A zero field keeps the Docker backend's safe default for that dimension:
 
@@ -93,23 +103,43 @@ Resource fields are independent overrides. A zero field keeps the Docker backend
 
 Docker requires an explicit memory limit to be at least 6 MiB; smaller non-zero values are rejected before container creation. An OOM-killed container is classified as `TerminationResourceLimit`. Non-zero application exit codes remain ordinary completed workload results.
 
-The backend still enforces:
+### Filesystem isolation
+
+The container root filesystem remains read-only. A writable host workspace is opt-in and is constrained by a trusted backend configuration:
+
+- `WithWorkspaceRoot(root)` defines the **maximum host filesystem scope** the runtime may expose.
+- `Filesystem.WorkspacePath` is relative to that root; absolute paths and `..` traversal are rejected.
+- the selected path is canonicalized with symlinks resolved and must remain inside the configured root.
+- the workspace is always mounted at `/workspace`; Agent input cannot choose a container mount target.
+- `WorkspaceReadOnly=true` adds a recursively read-only bind mount. If the host kernel cannot enforce recursive read-only semantics, Docker fails rather than silently downgrading the mount.
+- `TempDir=true` adds a 64 MiB tmpfs at `/tmp`; tmpfs usage also counts against the container memory limit.
+
+Configure the workspace root as narrowly as possible, ideally one root per Agent/session trust domain. Everything below the configured root is part of the granted host filesystem capability.
+
+Workspace bind mounts currently require the Docker daemon to run on the same host as the runtime process because path and symlink validation happen on the local host filesystem before the bind mount is sent to Docker. Remote Docker contexts are not a supported filesystem-isolation configuration.
+
+Explicit writable container roots are still rejected with `docker.ErrUnsupportedPolicy`.
+
+### Environment boundary
+
+Request environment variables are container data, not Docker control-plane configuration. They are written to a mode-`0600` temporary env file and passed with `docker create --env-file`; the file is deleted immediately after the create call returns.
+
+This keeps values such as `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, proxy settings, and secrets out of the Docker CLI process environment and out of its argv. Newline, carriage-return, and NUL delimiters are rejected because they cannot be represented safely in the env-file transport.
+
+The backend also continues to enforce:
 
 - network `none`
-- read-only root filesystem
 - timeout/cancellation cleanup through an independent `docker rm --force` context
 - bounded combined stdout/stderr capture with `ExecResult.OutputTruncated`
 
-Writable roots, workspace mounts, tmpfs, and non-`none` networking still return `docker.ErrUnsupportedPolicy` before Docker is called.
-
-Request environment values are not interpolated into a shell command or placed in Docker CLI arguments. Only variable names are passed as `--env NAME`; values are inherited by the Docker CLI process environment.
+Non-`none` networking still returns `docker.ErrUnsupportedPolicy` before Docker is called.
 
 ## Roadmap
 
 1. ✅ runtime contract and threat model
 2. ✅ Docker execution backend baseline
 3. ✅ resource and output limits
-4. filesystem isolation
+4. ✅ filesystem isolation
 5. network isolation
 6. syscall / capability policy
 7. Linux Landlock experiments
