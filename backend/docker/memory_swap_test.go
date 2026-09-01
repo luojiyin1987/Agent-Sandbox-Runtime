@@ -70,7 +70,7 @@ func TestDockerMemorySwapIntegration(t *testing.T) {
 
 	result, err := backend.Execute(context.Background(), sandbox.ExecRequest{
 		Command: "sh",
-		Args: []string{"-c", `printf 'memory='; cat /sys/fs/cgroup/memory.max; printf 'swap='; cat /sys/fs/cgroup/memory.swap.max`},
+		Args:    []string{"-c", `printf 'memory='; cat /sys/fs/cgroup/memory.max; printf 'swap='; cat /sys/fs/cgroup/memory.swap.max`},
 		Resources: sandbox.ResourceLimits{
 			MaxMemoryBytes: 64 << 20,
 		},
