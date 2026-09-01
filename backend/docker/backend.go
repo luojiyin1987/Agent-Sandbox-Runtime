@@ -41,7 +41,7 @@ var (
 	ErrUnsupportedPolicy = errors.New("docker backend does not support requested policy")
 	// ErrCleanup marks a lifecycle failure where the runtime could not prove that
 	// an execution-owned Docker resource was removed before Execute returned.
-	ErrCleanup = errors.New("docker sandbox cleanup failed")
+	ErrCleanup           = errors.New("docker sandbox cleanup failed")
 )
 
 type commandRunner func(ctx context.Context, stdout, stderr io.Writer, args ...string) error
