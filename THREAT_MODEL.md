@@ -16,7 +16,7 @@ The runtime is designed to contain common Agent-generated workload failures and 
 
 - destructive shell commands
 - accidental or malicious filesystem writes outside the granted workspace
-- unexpected outbound network access
+- unexpected outbound network access when networking has not been granted
 - fork bombs and process exhaustion
 - CPU and memory exhaustion
 - unbounded stdout/stderr output
@@ -37,6 +37,8 @@ The runtime is designed to contain common Agent-generated workload failures and 
 7. **Backend details do not weaken the contract.** Docker, gVisor, or future backends must satisfy the same conformance semantics.
 8. **Workspace roots are capabilities.** An untrusted request may select only inside a trusted backend-configured workspace root; it cannot supply an arbitrary host bind source or container mount target.
 9. **Workload environment is data, not control-plane configuration.** Request environment variables must not be able to redirect or reconfigure the Docker client used by the trusted runtime.
+10. **Network access requires a trusted capability.** A request cannot grant itself Docker outbound access; the operator must explicitly enable that capability on the backend.
+11. **Broad outbound is not an allowlist.** A backend must never satisfy `NetworkAllowlist` by silently falling back to an unrestricted bridge network.
 
 ## Docker workspace assumptions
 
@@ -45,6 +47,16 @@ The trusted operator must configure `WithWorkspaceRoot` as the smallest host dir
 The current Docker bind-mount implementation validates paths and symlinks against the local host filesystem. Therefore filesystem isolation with a workspace assumes the Docker daemon runs on the same host as the runtime process. Remote Docker contexts are not part of the supported workspace threat model.
 
 Read-only workspaces request recursive read-only bind semantics. A host that cannot enforce that boundary must fail container creation rather than expose writable nested mounts.
+
+## Docker network assumptions
+
+The default network policy uses Docker's `none` driver. Outbound access is available only when the trusted operator constructs the backend with `WithOutboundNetwork()` and the request explicitly selects `NetworkOutbound`.
+
+Each outbound execution gets a fresh user-defined bridge instead of the shared Docker default bridge. Inter-container communication is disabled on that bridge and the network is removed after the sandbox container is removed. Network creation and removal are part of the runtime lifecycle, including unknown-result cleanup after a client-side create failure.
+
+`NetworkOutbound` is intentionally broad. It follows the Docker host's routing and firewall policy and can therefore include host-gateway, LAN, or other routed destinations. It must not be described or relied on as "internet only".
+
+Destination allowlists are not implemented by the current Docker backend. `NetworkAllowlist` fails closed before any Docker call. Enforcing destination policy safely requires a trusted egress firewall or proxy and explicit handling of DNS resolution, address changes, and bypass paths.
 
 ## Out of scope for the initial Docker backend
 
@@ -71,6 +83,7 @@ Sandbox Runtime control plane (trusted)
         |
         +-- trusted image
         +-- trusted workspace root
+        +-- trusted outbound-network capability
         +-- trusted Docker client environment
         |
         v

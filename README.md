@@ -2,7 +2,7 @@
 
 A policy-driven runtime for executing untrusted Agent tool workloads under explicit resource, filesystem, network, and process boundaries.
 
-> Status: Docker execution backend with per-request resource limits and filesystem isolation. Network expansion remains fail-closed and is planned next.
+> Status: Docker execution backend with per-request resource limits, filesystem isolation, and opt-in outbound networking. Destination allowlists remain fail-closed.
 
 ## Why
 
@@ -21,7 +21,7 @@ Sandbox Runtime API
       |
       v
 Execution Backend
-      +-- Docker   (resource + filesystem isolation available)
+      +-- Docker   (resource + filesystem + network modes)
       +-- gVisor   (planned)
 ```
 
@@ -49,44 +49,34 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for the security boundary and non-goals.
 The Docker backend uses one fresh container per execution and requires the Docker CLI to be available to the runtime process.
 
 ```go
-package main
-
-import (
-    "context"
-    "fmt"
-    "time"
-
-    sandbox "github.com/luojiyin1987/Agent-Sandbox-Runtime"
-    dockerbackend "github.com/luojiyin1987/Agent-Sandbox-Runtime/backend/docker"
+runtime, err := dockerbackend.New(
+    "alpine:3.22",
+    dockerbackend.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
+    dockerbackend.WithOutboundNetwork(),
 )
-
-func main() {
-    runtime, err := dockerbackend.New(
-        "alpine:3.22",
-        dockerbackend.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
-    )
-    if err != nil {
-        panic(err)
-    }
-
-    result, err := runtime.Execute(context.Background(), sandbox.ExecRequest{
-        Command: "sh",
-        Args:    []string{"-c", "cat input.txt; printf done > output.txt"},
-        WorkDir: "/workspace",
-        Timeout: 5 * time.Second,
-        Resources: sandbox.ResourceLimits{
-            MaxMemoryBytes: 128 << 20,
-            MaxProcesses:   32,
-            MaxOutputBytes: 256 << 10,
-            MilliCPUs:      500,
-        },
-        Filesystem: sandbox.FilesystemPolicy{
-            WorkspacePath: ".",
-            TempDir:       true,
-        },
-    })
-    fmt.Printf("exit=%d stdout=%q err=%v\n", result.ExitCode, result.Stdout, err)
+if err != nil {
+    panic(err)
 }
+
+result, err := runtime.Execute(context.Background(), sandbox.ExecRequest{
+    Command: "sh",
+    Args:    []string{"-c", "cat input.txt; printf done > output.txt"},
+    WorkDir: "/workspace",
+    Timeout: 5 * time.Second,
+    Resources: sandbox.ResourceLimits{
+        MaxMemoryBytes: 128 << 20,
+        MaxProcesses:   32,
+        MaxOutputBytes: 256 << 10,
+        MilliCPUs:      500,
+    },
+    Filesystem: sandbox.FilesystemPolicy{
+        WorkspacePath: ".",
+        TempDir:       true,
+    },
+    Network: sandbox.NetworkPolicy{
+        Mode: sandbox.NetworkOutbound,
+    },
+})
 ```
 
 ### Resource limits
@@ -120,19 +110,28 @@ Workspace bind mounts currently require the Docker daemon to run on the same hos
 
 Explicit writable container roots are still rejected with `docker.ErrUnsupportedPolicy`.
 
+### Network isolation
+
+Networking has two independent gates: a trusted backend capability and the per-request policy.
+
+- the zero-value backend does **not** grant outbound networking.
+- `WithOutboundNetwork()` is a trusted operator capability that permits this backend to honor `NetworkOutbound` requests.
+- `NetworkNone` remains the default and uses Docker's `none` driver, which leaves the workload without a default route.
+- `NetworkOutbound` creates a fresh user-defined bridge for that execution, disables inter-container communication on the bridge, attaches only the sandbox container, and removes the bridge after container cleanup.
+- the shared Docker default `bridge` is never used for sandbox outbound mode.
+- network creation is treated as an unknown-result operation: a client-side create failure still triggers cleanup by the already-known random network name.
+
+`NetworkOutbound` means broad routed egress according to the Docker host's routes and firewall. It is **not** an internet-only policy: host-gateway or LAN destinations may be reachable if the host networking permits them.
+
+`NetworkAllowlist` remains unsupported and returns `docker.ErrUnsupportedPolicy` before Docker is called, even when `WithOutboundNetwork()` is enabled. Docker bridge creation alone does not enforce destination filtering. A trustworthy allowlist needs an operator-controlled firewall or egress proxy with explicit DNS/address semantics; it must not silently degrade to unrestricted outbound access.
+
 ### Environment boundary
 
 Request environment variables are container data, not Docker control-plane configuration. They are written to a mode-`0600` temporary env file and passed with `docker create --env-file`; the file is deleted immediately after the create call returns.
 
 This keeps values such as `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, proxy settings, and secrets out of the Docker CLI process environment and out of its argv. Newline, carriage-return, and NUL delimiters are rejected because they cannot be represented safely in the env-file transport.
 
-The backend also continues to enforce:
-
-- network `none`
-- timeout/cancellation cleanup through an independent `docker rm --force` context
-- bounded combined stdout/stderr capture with `ExecResult.OutputTruncated`
-
-Non-`none` networking still returns `docker.ErrUnsupportedPolicy` before Docker is called.
+The backend also continues to enforce timeout/cancellation cleanup and bounded combined stdout/stderr capture with `ExecResult.OutputTruncated`.
 
 ## Roadmap
 
@@ -140,7 +139,7 @@ Non-`none` networking still returns `docker.ErrUnsupportedPolicy` before Docker 
 2. ✅ Docker execution backend baseline
 3. ✅ resource and output limits
 4. ✅ filesystem isolation
-5. network isolation
+5. ✅ network isolation (`none` + opt-in broad outbound; allowlist remains fail-closed)
 6. syscall / capability policy
 7. Linux Landlock experiments
 8. gVisor backend and shared conformance suite
