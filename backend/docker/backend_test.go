@@ -296,7 +296,7 @@ func TestExecuteCompilesFilesystemMounts(t *testing.T) {
 
 	joined := strings.Join(fake.snapshotCalls()[0].args, " ")
 	for _, want := range []string{
-		"--mount type=bind,src=" + workspace + ",dst=/workspace,readonly,bind-recursive=readonly",
+		"--mount type=bind,src=" + workspace + ",dst=/workspace,readonly,bind-propagation=rprivate,bind-recursive=readonly",
 		"--mount type=tmpfs,dst=/tmp,tmpfs-size=67108864,tmpfs-mode=1777",
 		"--workdir /workspace",
 	} {
