@@ -56,7 +56,7 @@ func (f *networkFakeRunner) snapshotCalls() []runnerCall {
 
 func newOutboundTestBackend(t *testing.T, fake *networkFakeRunner) *Backend {
 	t.Helper()
-	backend, err := New("alpine:3.22", WithOutboundNetwork())
+	backend, err := New(testImageDigest, WithOutboundNetwork())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -208,7 +208,7 @@ func TestDockerBackendIntegrationOutboundNetwork(t *testing.T) {
 		t.Skip("set SANDBOX_DOCKER_INTEGRATION=1 to run Docker integration test")
 	}
 
-	backend, err := New("alpine:3.22", WithOutboundNetwork())
+	backend, err := New(testImageDigest, WithOutboundNetwork())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
