@@ -2,7 +2,7 @@
 
 A policy-driven runtime for executing untrusted Agent tool workloads under explicit resource, filesystem, network, and process boundaries.
 
-> Status: Docker execution backend with resource limits, filesystem isolation, opt-in outbound networking, and mandatory process hardening. Destination allowlists remain fail-closed.
+> Status: Docker execution backend with resource limits, filesystem isolation, opt-in outbound networking, and mandatory process hardening. A standalone Landlock experiment is available for evaluating an additional Linux LSM layer; it is not yet part of the Docker backend contract. Destination allowlists remain fail-closed.
 
 ## Why
 
@@ -24,6 +24,9 @@ Sandbox Runtime API
 Execution Backend
       +-- Docker   (resource + filesystem + network + process hardening)
       +-- gVisor   (planned)
+
+Standalone experiments
+      +-- Landlock filesystem write confinement
 ```
 
 ## Contract
@@ -156,6 +159,26 @@ Seccomp     = 2
 
 They also verify privileged `mknod` and `mount` attempts fail. These checks prove the workload-visible state rather than only checking generated CLI arguments.
 
+## Landlock experiment
+
+`experiments/landlock` evaluates whether Linux Landlock can add a second filesystem-write boundary without changing mount topology or weakening the existing Docker controls.
+
+```sh
+go run ./experiments/landlock probe
+go run ./experiments/landlock demo
+```
+
+The experiment probes the Landlock ABI at runtime. It requires ABI 3+ for the write-confinement demo so `WRITE_FILE` and `TRUNCATE` can be handled together. It grants filesystem mutation rights only beneath one temporary `allowed/` hierarchy, verifies creation and truncation are blocked under a sibling `denied/` hierarchy, and deliberately leaves reads unhandled to make the narrow scope explicit.
+
+The Go threading result is especially important:
+
+- ABI 8+ can use `LANDLOCK_RESTRICT_SELF_TSYNC` and reports `process-tsync`, meaning the Landlock domain is applied atomically to all threads of the process.
+- ABI 3-7 reports `thread-locked`; the demo pins the executing goroutine to one OS thread, but sibling Go runtime threads remain outside that Landlock domain. This is an experiment only, not a production whole-process guarantee.
+
+Landlock is a stackable LSM and only removes rights. It complements Unix DAC, seccomp, and mount namespaces; it does not replace the read-only root, trusted workspace mount boundary, or other Docker isolation. File descriptors opened before enforcement keep their prior access properties, and current Landlock does not restrict every metadata operation such as `chmod`, `chown`, `setxattr`, and `utime`.
+
+See [experiments/landlock/README.md](experiments/landlock/README.md) for the detailed boundary and rationale. No Docker backend request or security guarantee depends on this experiment yet.
+
 ### Environment boundary
 
 Request environment variables are container data, not Docker control-plane configuration. They are written to a mode-`0600` temporary env file and passed with `docker create --env-file`; the file is deleted immediately after the create call returns.
@@ -172,12 +195,12 @@ The backend also continues to enforce timeout/cancellation cleanup and bounded c
 4. ✅ filesystem isolation
 5. ✅ network isolation (`none` + opt-in broad outbound; allowlist remains fail-closed)
 6. ✅ syscall / capability baseline (runtime UID/GID + `cap-drop ALL` + no-new-privileges + built-in seccomp)
-7. Linux Landlock experiments
+7. ✅ Linux Landlock capability + confinement experiment (standalone; not yet backend enforcement)
 8. gVisor backend and shared conformance suite
 
 ## Development
 
-Requires Go 1.26 or newer. Docker integration tests are opt-in locally.
+Requires Go 1.26 or newer. Docker and Landlock integration tests are opt-in locally.
 
 ```sh
 gofmt -w .
@@ -185,4 +208,9 @@ go vet ./...
 go test -race ./...
 
 SANDBOX_DOCKER_INTEGRATION=1 go test -race ./backend/docker -run 'TestDocker.*Integration' -count=1
+
+# Linux kernel Landlock probe + standalone demo
+go run ./experiments/landlock probe
+go run ./experiments/landlock demo
+SANDBOX_LANDLOCK_INTEGRATION=1 go test -race ./experiments/landlock -run TestLandlockConfinementIntegration -count=1
 ```
