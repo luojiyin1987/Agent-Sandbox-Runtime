@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,8 +26,11 @@ const (
 	defaultProcesses      = 64
 	defaultMilliCPUs      = int64(1000)
 	defaultMaxOutputBytes = int64(1 << 20)
+	defaultTempDirBytes   = int64(64 << 20)
 	minimumMemoryBytes    = int64(6 << 20)
 	cleanupTimeout        = 5 * time.Second
+	containerWorkspace    = "/workspace"
+	containerTempDir      = "/tmp"
 )
 
 // ErrUnsupportedPolicy is returned when the Docker backend cannot yet enforce
@@ -34,30 +38,81 @@ const (
 // downgraded.
 var ErrUnsupportedPolicy = errors.New("docker backend does not support requested policy")
 
-type commandRunner func(ctx context.Context, env []string, stdout, stderr io.Writer, args ...string) error
+type commandRunner func(ctx context.Context, stdout, stderr io.Writer, args ...string) error
+
+// Option configures trusted Docker backend state.
+type Option func(*Backend) error
+
+// WithWorkspaceRoot configures the trusted host directory from which requests
+// may select workspace subdirectories. ExecRequest.Filesystem.WorkspacePath is
+// resolved relative to this root and is always mounted at /workspace.
+//
+// Workspace mounts require the Docker daemon to run on the same host as this
+// runtime process because path validation is performed against the local host
+// filesystem before Docker receives the bind mount.
+func WithWorkspaceRoot(root string) Option {
+	return func(b *Backend) error {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			return fmt.Errorf("%w: workspace root is required", sandbox.ErrInvalidRequest)
+		}
+
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return fmt.Errorf("%w: resolve workspace root: %v", sandbox.ErrInvalidRequest, err)
+		}
+		resolved, err := filepath.EvalSymlinks(absolute)
+		if err != nil {
+			return fmt.Errorf("%w: resolve workspace root: %v", sandbox.ErrInvalidRequest, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return fmt.Errorf("%w: stat workspace root: %v", sandbox.ErrInvalidRequest, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%w: workspace root must be a directory", sandbox.ErrInvalidRequest)
+		}
+		if strings.ContainsRune(resolved, ',') {
+			return fmt.Errorf("%w: workspace root cannot contain a comma", sandbox.ErrInvalidRequest)
+		}
+
+		b.workspaceRoot = filepath.Clean(resolved)
+		return nil
+	}
+}
 
 // Backend executes sandbox requests in Docker containers.
 //
-// Resource limits and timeout are compiled per request. Writable filesystems,
-// workspace mounts, temporary filesystems, and network access are still
-// rejected until their policy compilers are implemented in later changes.
+// Resource limits, workspace mounts, a bounded /tmp tmpfs, and timeout are
+// compiled per request. The container root remains read-only and network access
+// remains disabled until later policy compilers explicitly support them.
 type Backend struct {
-	image string
-	run   commandRunner
+	image         string
+	workspaceRoot string
+	run           commandRunner
 }
 
 var _ sandbox.Runtime = (*Backend)(nil)
 
 // New creates a Docker backend pinned to a trusted container image.
-func New(image string) (*Backend, error) {
+func New(image string, options ...Option) (*Backend, error) {
 	if strings.TrimSpace(image) == "" {
 		return nil, fmt.Errorf("%w: docker image is required", sandbox.ErrInvalidRequest)
 	}
 
-	return &Backend{
+	backend := &Backend{
 		image: strings.TrimSpace(image),
 		run:   runDocker,
-	}, nil
+	}
+	for _, option := range options {
+		if option == nil {
+			continue
+		}
+		if err := option(backend); err != nil {
+			return nil, err
+		}
+	}
+	return backend, nil
 }
 
 // Execute runs one request in a fresh Docker container and removes the
@@ -92,6 +147,12 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 		return result, err
 	}
 
+	workspacePath, err := b.resolveWorkspace(req.Filesystem)
+	if err != nil {
+		finish()
+		return result, err
+	}
+
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = defaultTimeout
@@ -110,14 +171,22 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 	// makes that path fail closed.
 	defer b.removeContainer(name)
 
+	envFile, removeEnvFile, err := writeEnvironmentFile(req.Env)
+	if err != nil {
+		finish()
+		return result, err
+	}
+
 	var createOut bytes.Buffer
 	var createErr bytes.Buffer
-	if err := b.run(execCtx, dockerEnvironment(req.Env), &createOut, &createErr, createArgs(name, b.image, req)...); err != nil {
+	createRunErr := b.run(execCtx, &createOut, &createErr, createArgs(name, b.image, req, workspacePath, envFile)...)
+	removeEnvFile()
+	if createRunErr != nil {
 		finish()
 		if contextErr := execCtx.Err(); contextErr != nil {
 			return resultForContext(result, contextErr), contextErr
 		}
-		return result, fmt.Errorf("docker create failed: %w", err)
+		return result, fmt.Errorf("docker create failed: %w", createRunErr)
 	}
 
 	containerID := strings.TrimSpace(createOut.String())
@@ -128,7 +197,7 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 
 	limits := effectiveResourceLimits(req.Resources)
 	capture := newOutputCapture(limits.MaxOutputBytes)
-	startErr := b.run(execCtx, nil, capture.stdoutWriter(), capture.stderrWriter(), "start", "--attach", name)
+	startErr := b.run(execCtx, capture.stdoutWriter(), capture.stderrWriter(), "start", "--attach", name)
 	result.Stdout, result.Stderr, result.OutputTruncated = capture.snapshot()
 	finish()
 
@@ -165,9 +234,6 @@ func validateSupportedPolicy(req sandbox.ExecRequest) error {
 	if req.EffectiveRootFilesystemMode() != sandbox.RootReadOnly {
 		return fmt.Errorf("%w: root filesystem mode %q", ErrUnsupportedPolicy, req.EffectiveRootFilesystemMode())
 	}
-	if req.Filesystem.WorkspacePath != "" || req.Filesystem.WorkspaceReadOnly || req.Filesystem.TempDir {
-		return fmt.Errorf("%w: custom filesystem policy", ErrUnsupportedPolicy)
-	}
 	return nil
 }
 
@@ -196,17 +262,92 @@ func effectiveResourceLimits(limits sandbox.ResourceLimits) sandbox.ResourceLimi
 
 func validateEnvironment(env map[string]string) error {
 	for key, value := range env {
-		if key == "" || strings.ContainsAny(key, "=\x00") {
+		if key == "" || strings.ContainsAny(key, "=\x00\r\n") {
 			return fmt.Errorf("%w: invalid environment variable name %q", sandbox.ErrInvalidRequest, key)
 		}
-		if strings.ContainsRune(value, '\x00') {
-			return fmt.Errorf("%w: environment variable %q contains NUL", sandbox.ErrInvalidRequest, key)
+		if strings.ContainsAny(value, "\x00\r\n") {
+			return fmt.Errorf("%w: environment variable %q contains a control delimiter", sandbox.ErrInvalidRequest, key)
 		}
 	}
 	return nil
 }
 
-func createArgs(name, image string, req sandbox.ExecRequest) []string {
+func writeEnvironmentFile(env map[string]string) (string, func(), error) {
+	if len(env) == 0 {
+		return "", func() {}, nil
+	}
+
+	file, err := os.CreateTemp("", "agent-sandbox-env-*")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create Docker environment file: %w", err)
+	}
+	path := file.Name()
+	cleanup := func() {
+		_ = os.Remove(path)
+	}
+
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, err := fmt.Fprintf(file, "%s=%s\n", key, env[key]); err != nil {
+			_ = file.Close()
+			cleanup()
+			return "", func() {}, fmt.Errorf("write Docker environment file: %w", err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("close Docker environment file: %w", err)
+	}
+	return path, cleanup, nil
+}
+
+func (b *Backend) resolveWorkspace(policy sandbox.FilesystemPolicy) (string, error) {
+	if policy.WorkspacePath == "" {
+		return "", nil
+	}
+	if b.workspaceRoot == "" {
+		return "", fmt.Errorf("%w: workspace root is not configured", ErrUnsupportedPolicy)
+	}
+	if strings.ContainsRune(policy.WorkspacePath, '\x00') || filepath.IsAbs(policy.WorkspacePath) {
+		return "", fmt.Errorf("%w: workspace path must be relative to the configured workspace root", sandbox.ErrInvalidRequest)
+	}
+
+	clean := filepath.Clean(policy.WorkspacePath)
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%w: workspace path escapes the configured workspace root", sandbox.ErrInvalidRequest)
+	}
+
+	candidate := filepath.Join(b.workspaceRoot, clean)
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve workspace path: %v", sandbox.ErrInvalidRequest, err)
+	}
+	relative, err := filepath.Rel(b.workspaceRoot, resolved)
+	if err != nil {
+		return "", fmt.Errorf("%w: compare workspace path: %v", sandbox.ErrInvalidRequest, err)
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%w: workspace symlink escapes the configured workspace root", sandbox.ErrInvalidRequest)
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("%w: stat workspace path: %v", sandbox.ErrInvalidRequest, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%w: workspace path must resolve to a directory", sandbox.ErrInvalidRequest)
+	}
+	if strings.ContainsRune(resolved, ',') {
+		return "", fmt.Errorf("%w: resolved workspace path cannot contain a comma", sandbox.ErrInvalidRequest)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envFile string) []string {
 	limits := effectiveResourceLimits(req.Resources)
 	args := []string{
 		"create",
@@ -218,17 +359,25 @@ func createArgs(name, image string, req sandbox.ExecRequest) []string {
 		"--cpus", fmt.Sprintf("%.3f", float64(limits.MilliCPUs)/1000),
 	}
 
+	if workspacePath != "" {
+		mount := "type=bind,src=" + workspacePath + ",dst=" + containerWorkspace
+		if req.Filesystem.WorkspaceReadOnly {
+			mount += ",readonly,bind-recursive=readonly"
+		}
+		args = append(args, "--mount", mount)
+	}
+	if req.Filesystem.TempDir {
+		args = append(args, "--mount", fmt.Sprintf(
+			"type=tmpfs,dst=%s,tmpfs-size=%d,tmpfs-mode=1777",
+			containerTempDir,
+			defaultTempDirBytes,
+		))
+	}
 	if req.WorkDir != "" {
 		args = append(args, "--workdir", req.WorkDir)
 	}
-
-	keys := make([]string, 0, len(req.Env))
-	for key := range req.Env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		args = append(args, "--env", key)
+	if envFile != "" {
+		args = append(args, "--env-file", envFile)
 	}
 
 	args = append(args, image, req.Command)
@@ -236,29 +385,8 @@ func createArgs(name, image string, req sandbox.ExecRequest) []string {
 	return args
 }
 
-func dockerEnvironment(env map[string]string) []string {
-	if len(env) == 0 {
-		return nil
-	}
-
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	values := append([]string(nil), os.Environ()...)
-	for _, key := range keys {
-		values = append(values, key+"="+env[key])
-	}
-	return values
-}
-
-func runDocker(ctx context.Context, env []string, stdout, stderr io.Writer, args ...string) error {
+func runDocker(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	if env != nil {
-		cmd.Env = env
-	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
@@ -275,7 +403,7 @@ func (b *Backend) inspectState(name string) (containerState, error) {
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	if err := b.run(ctx, nil, &stdout, &stderr, "inspect", "--format", "{{.State.ExitCode}} {{.State.OOMKilled}}", name); err != nil {
+	if err := b.run(ctx, &stdout, &stderr, "inspect", "--format", "{{.State.ExitCode}} {{.State.OOMKilled}}", name); err != nil {
 		return containerState{}, fmt.Errorf("docker inspect failed: %w", err)
 	}
 
@@ -297,7 +425,7 @@ func (b *Backend) inspectState(name string) (containerState, error) {
 func (b *Backend) removeContainer(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
-	_ = b.run(ctx, nil, io.Discard, io.Discard, "rm", "--force", name)
+	_ = b.run(ctx, io.Discard, io.Discard, "rm", "--force", name)
 }
 
 func containerName() (string, error) {
