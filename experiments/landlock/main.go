@@ -17,12 +17,12 @@ type probeResult struct {
 }
 
 type demoResult struct {
-	Probe                     probeResult `json:"probe"`
-	Enforcement               string      `json:"enforcement"`
-	AllowedWriteSucceeded     bool        `json:"allowed_write_succeeded"`
-	DeniedCreateBlocked       bool        `json:"denied_create_blocked"`
-	DeniedTruncateBlocked     bool        `json:"denied_truncate_blocked"`
-	DeniedPathReadSucceeded   bool        `json:"denied_path_read_succeeded"`
+	Probe                   probeResult `json:"probe"`
+	Enforcement             string      `json:"enforcement"`
+	AllowedWriteSucceeded   bool        `json:"allowed_write_succeeded"`
+	DeniedCreateBlocked     bool        `json:"denied_create_blocked"`
+	DeniedTruncateBlocked   bool        `json:"denied_truncate_blocked"`
+	DeniedPathReadSucceeded bool        `json:"denied_path_read_succeeded"`
 }
 
 func main() {
