@@ -43,6 +43,7 @@ The runtime is designed to contain common Agent-generated workload failures and 
 11. **Broad outbound is not an allowlist.** A backend must never satisfy `NetworkAllowlist` by silently falling back to an unrestricted bridge network.
 12. **Process privilege hardening is non-optional.** Docker workloads run as the runtime's effective UID/GID with all Linux capabilities dropped, `no-new-privileges` enabled, and Docker's built-in seccomp profile explicitly selected. An untrusted request cannot relax those controls.
 13. **Security profiles must not stale-fork stronger upstream defaults.** The Docker backend does not vendor a frozen copy of Docker's built-in seccomp profile merely to customize it; any future syscall customization must preserve or tighten the then-current baseline.
+14. **Experiments are not backend guarantees.** A standalone security experiment does not strengthen the production runtime contract until its lifecycle, platform requirements, and conformance semantics are explicitly integrated and tested through the backend.
 
 ## Docker workspace assumptions
 
@@ -75,6 +76,18 @@ Dropping all capabilities removes Docker's ordinary capability allowlist rather 
 These controls are defense in depth, not a VM-strength boundary. Seccomp only filters syscalls; capabilities govern privileged kernel operations; namespaces isolate selected kernel resources; filesystem and network policies constrain different surfaces. Passing one layer does not imply another layer is redundant.
 
 The runtime intentionally does not expose `--privileged`, capability additions, a request-selected container UID/GID, `seccomp=unconfined`, or a request-controlled seccomp profile. A custom seccomp JSON replaces Docker's built-in profile rather than extending it, so a stale vendored profile could accidentally lose later upstream hardening.
+
+## Landlock experiment boundary
+
+`experiments/landlock` is intentionally outside the Docker backend execution path. It evaluates Landlock as an additional Linux LSM restriction layer; it does not currently change `Runtime.Execute`, Docker create arguments, or the backend's documented production guarantees.
+
+The experiment handles filesystem write and mutation rights only. It grants those rights beneath one selected hierarchy while leaving reads unhandled. This proves that Landlock can remove write rights from paths which remain visible to the process, but it is not a full replacement for the mount namespace, read-only mounts, Unix DAC, or the trusted workspace capability boundary.
+
+The experiment requires Landlock ABI 3 or newer so `LANDLOCK_ACCESS_FS_WRITE_FILE` and `LANDLOCK_ACCESS_FS_TRUNCATE` can be handled together. On ABI 8 or newer it uses `LANDLOCK_RESTRICT_SELF_TSYNC` for process-wide synchronization. On ABI 3-7, its `thread-locked` mode demonstrates behavior only on one locked OS thread; sibling Go runtime threads remain outside that new Landlock domain and this mode must not be treated as a whole-process sandbox.
+
+Any future integration must also account for Landlock limitations that differ from mount isolation: file descriptors opened before enforcement retain their prior access properties, and current Landlock does not restrict every filesystem metadata action such as `chmod`, `chown`, `setxattr`, or `utime`.
+
+Because Landlock is stackable and monotonic, it can only reduce access. It cannot grant an operation already denied by Unix DAC, another LSM, seccomp/capability requirements, a read-only mount, or namespace topology. This makes it a possible defense-in-depth layer rather than a replacement for the controls already enforced by the Docker backend.
 
 ## Out of scope for the initial Docker backend
 
@@ -111,6 +124,12 @@ Execution backend
         |
         v
 Sandboxed workload (untrusted)
+
+Standalone Landlock experiment
+        |
+        +-- probes running-kernel ABI
+        +-- evaluates an extra LSM write boundary
+        +-- does not modify the backend contract yet
 ```
 
 The runtime control plane must never treat workload-provided text as trusted configuration for the backend.
