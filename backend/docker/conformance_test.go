@@ -15,7 +15,7 @@ func TestDockerConformanceIntegration(t *testing.T) {
 
 	conformance.Run(t, func(t *testing.T, workspaceRoot string) sandbox.Runtime {
 		t.Helper()
-		backend, err := New("alpine:3.22", WithWorkspaceRoot(workspaceRoot))
+		backend, err := New(testImageDigest, WithWorkspaceRoot(workspaceRoot))
 		if err != nil {
 			t.Fatalf("New() error = %v", err)
 		}
