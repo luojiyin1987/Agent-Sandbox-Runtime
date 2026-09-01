@@ -372,6 +372,7 @@ func (b *Backend) resolveWorkspace(policy sandbox.FilesystemPolicy) (string, err
 
 func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envFile, dockerNetwork string) []string {
 	limits := effectiveResourceLimits(req.Resources)
+	memoryLimit := strconv.FormatInt(limits.MaxMemoryBytes, 10)
 	args := []string{
 		"create",
 		"--name", name,
@@ -381,7 +382,8 @@ func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envF
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges=true",
 		"--security-opt", "seccomp=builtin",
-		"--memory", strconv.FormatInt(limits.MaxMemoryBytes, 10),
+		"--memory", memoryLimit,
+		"--memory-swap", memoryLimit,
 		"--pids-limit", strconv.Itoa(limits.MaxProcesses),
 		"--cpus", fmt.Sprintf("%.3f", float64(limits.MilliCPUs)/1000),
 	}
