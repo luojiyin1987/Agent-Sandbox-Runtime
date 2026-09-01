@@ -3,16 +3,68 @@ package docker
 import (
 	"context"
 	"errors"
+	"io"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	sandbox "github.com/luojiyin1987/Agent-Sandbox-Runtime"
 )
 
+type networkFakeRunner struct {
+	mu                 sync.Mutex
+	calls              []runnerCall
+	networkCreateError error
+	blockStart         bool
+}
+
+func (f *networkFakeRunner) run(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, runnerCall{args: slices.Clone(args)})
+	f.mu.Unlock()
+
+	switch args[0] {
+	case "network":
+		if len(args) > 1 && args[1] == "create" {
+			if f.networkCreateError != nil {
+				return f.networkCreateError
+			}
+			_, _ = io.WriteString(stdout, "network-id\n")
+		}
+	case "create":
+		_, _ = io.WriteString(stdout, "container-id\n")
+	case "start":
+		if f.blockStart {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	case "inspect":
+		_, _ = io.WriteString(stdout, "0 false\n")
+	}
+	return nil
+}
+
+func (f *networkFakeRunner) snapshotCalls() []runnerCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}
+
+func newOutboundTestBackend(t *testing.T, fake *networkFakeRunner) *Backend {
+	t.Helper()
+	backend, err := New("alpine:3.22", WithOutboundNetwork())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	backend.run = fake.run
+	return backend
+}
+
 func TestExecuteCompilesOutboundNetwork(t *testing.T) {
-	fake := &fakeRunner{exitCode: "0"}
-	backend := &Backend{image: "alpine:3.22", run: fake.run}
+	fake := &networkFakeRunner{}
+	backend := newOutboundTestBackend(t, fake)
 
 	_, err := backend.Execute(context.Background(), sandbox.ExecRequest{
 		Command: "true",
@@ -59,12 +111,25 @@ func TestExecuteCompilesOutboundNetwork(t *testing.T) {
 	}
 }
 
-func TestExecuteOutboundNetworkCreateFailureStillAttemptsCleanup(t *testing.T) {
-	fake := &fakeRunner{
-		exitCode:          "0",
-		networkCreateError: errors.New("connection reset"),
-	}
+func TestExecuteOutboundRequiresTrustedCapability(t *testing.T) {
+	fake := &networkFakeRunner{}
 	backend := &Backend{image: "alpine:3.22", run: fake.run}
+
+	_, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "true",
+		Network: sandbox.NetworkPolicy{Mode: sandbox.NetworkOutbound},
+	})
+	if !errors.Is(err, ErrUnsupportedPolicy) {
+		t.Fatalf("Execute() error = %v, want ErrUnsupportedPolicy", err)
+	}
+	if calls := fake.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("Docker called before outbound capability rejection: %+v", calls)
+	}
+}
+
+func TestExecuteOutboundNetworkCreateFailureStillAttemptsCleanup(t *testing.T) {
+	fake := &networkFakeRunner{networkCreateError: errors.New("connection reset")}
+	backend := newOutboundTestBackend(t, fake)
 
 	_, err := backend.Execute(context.Background(), sandbox.ExecRequest{
 		Command: "true",
@@ -88,8 +153,8 @@ func TestExecuteOutboundNetworkCreateFailureStillAttemptsCleanup(t *testing.T) {
 }
 
 func TestExecuteOutboundTimeoutCleansContainerBeforeNetwork(t *testing.T) {
-	fake := &fakeRunner{exitCode: "0", blockStart: true}
-	backend := &Backend{image: "alpine:3.22", run: fake.run}
+	fake := &networkFakeRunner{blockStart: true}
+	backend := newOutboundTestBackend(t, fake)
 
 	result, err := backend.Execute(context.Background(), sandbox.ExecRequest{
 		Command: "sleep",
