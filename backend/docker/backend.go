@@ -85,8 +85,9 @@ func WithWorkspaceRoot(root string) Option {
 //
 // Resource limits, workspace mounts, a bounded /tmp tmpfs, network mode, and
 // timeout are compiled per request. The container root remains read-only and
-// every workload runs with all Linux capabilities dropped, no-new-privileges,
-// and Docker's built-in seccomp profile.
+// every workload runs as the runtime process's effective UID/GID with all Linux
+// capabilities dropped, no-new-privileges, and Docker's built-in seccomp
+// profile.
 type Backend struct {
 	image         string
 	workspaceRoot string
@@ -376,6 +377,7 @@ func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envF
 		"--name", name,
 		"--network", dockerNetwork,
 		"--read-only",
+		"--user", fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()),
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges=true",
 		"--security-opt", "seccomp=builtin",
