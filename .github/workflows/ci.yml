@@ -21,7 +21,12 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: false
       - name: Check formatting
-        run: test -z "$(gofmt -l .)"
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            printf '%s\n' "$unformatted"
+            exit 1
+          fi
       - name: Vet
         run: go vet ./...
       - name: Test
@@ -38,7 +43,7 @@ jobs:
       - name: Check Docker daemon
         run: docker version
       - name: Pull integration image
-        run: docker pull alpine:3.22
+        run: docker pull alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
       - name: Run Docker backend integration tests
         env:
           SANDBOX_DOCKER_INTEGRATION: '1'
