@@ -1,9 +1,11 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -127,6 +129,25 @@ func TestExecuteOutboundRequiresTrustedCapability(t *testing.T) {
 	}
 }
 
+func TestExecuteAllowlistRemainsUnsupportedWithOutboundCapability(t *testing.T) {
+	fake := &networkFakeRunner{}
+	backend := newOutboundTestBackend(t, fake)
+
+	_, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "true",
+		Network: sandbox.NetworkPolicy{
+			Mode:  sandbox.NetworkAllowlist,
+			Allow: []string{"example.com:443"},
+		},
+	})
+	if !errors.Is(err, ErrUnsupportedPolicy) {
+		t.Fatalf("Execute() error = %v, want ErrUnsupportedPolicy", err)
+	}
+	if calls := fake.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("Docker called before allowlist rejection: %+v", calls)
+	}
+}
+
 func TestExecuteOutboundNetworkCreateFailureStillAttemptsCleanup(t *testing.T) {
 	fake := &networkFakeRunner{networkCreateError: errors.New("connection reset")}
 	backend := newOutboundTestBackend(t, fake)
@@ -179,5 +200,55 @@ func TestExecuteOutboundTimeoutCleansContainerBeforeNetwork(t *testing.T) {
 	last := calls[len(calls)-1].args
 	if len(last) < 2 || last[0] != "network" || last[1] != "rm" {
 		t.Fatalf("last Docker call = %+v, want network rm", last)
+	}
+}
+
+func TestDockerBackendIntegrationOutboundNetwork(t *testing.T) {
+	if os.Getenv("SANDBOX_DOCKER_INTEGRATION") != "1" {
+		t.Skip("set SANDBOX_DOCKER_INTEGRATION=1 to run Docker integration test")
+	}
+
+	backend, err := New("alpine:3.22", WithOutboundNetwork())
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	noneResult, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "sh",
+		Args:    []string{"-c", `awk '$2=="00000000"{found=1} END{exit found}' /proc/net/route`},
+	})
+	if err != nil {
+		t.Fatalf("NetworkNone Execute() error = %v", err)
+	}
+	if noneResult.ExitCode != 0 {
+		t.Fatalf("NetworkNone unexpectedly had a default route: %+v", noneResult)
+	}
+
+	outboundResult, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "sh",
+		Args:    []string{"-c", `awk '$2=="00000000"{found=1} END{exit !found}' /proc/net/route`},
+		Network:  sandbox.NetworkPolicy{Mode: sandbox.NetworkOutbound},
+	})
+	if err != nil {
+		t.Fatalf("NetworkOutbound Execute() error = %v", err)
+	}
+	if outboundResult.ExitCode != 0 {
+		t.Fatalf("NetworkOutbound had no default route: %+v", outboundResult)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := runDocker(
+		context.Background(),
+		&stdout,
+		&stderr,
+		"network", "ls",
+		"--filter", "label="+outboundNetworkLabel,
+		"--format", "{{.Name}}",
+	); err != nil {
+		t.Fatalf("docker network ls failed: %v (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	if leaked := strings.TrimSpace(stdout.String()); leaked != "" {
+		t.Fatalf("execution networks leaked after cleanup: %q", leaked)
 	}
 }
