@@ -83,9 +83,8 @@ func WithWorkspaceRoot(root string) Option {
 
 // Backend executes sandbox requests in Docker containers.
 //
-// Resource limits, workspace mounts, a bounded /tmp tmpfs, and timeout are
-// compiled per request. The container root remains read-only and network access
-// remains disabled until later policy compilers explicitly support them.
+// Resource limits, workspace mounts, a bounded /tmp tmpfs, network mode, and
+// timeout are compiled per request. The container root remains read-only.
 type Backend struct {
 	image         string
 	workspaceRoot string
@@ -160,6 +159,18 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	dockerNetwork, cleanupNetwork, err := b.prepareNetwork(execCtx, req.EffectiveNetworkMode())
+	if err != nil {
+		finish()
+		if contextErr := execCtx.Err(); contextErr != nil {
+			return resultForContext(result, contextErr), contextErr
+		}
+		return result, err
+	}
+	// Register network cleanup before container cleanup so defer LIFO ordering
+	// always removes the container before removing its execution network.
+	defer cleanupNetwork()
+
 	name, err := containerName()
 	if err != nil {
 		finish()
@@ -179,7 +190,7 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 
 	var createOut bytes.Buffer
 	var createErr bytes.Buffer
-	createRunErr := b.run(execCtx, &createOut, &createErr, createArgs(name, b.image, req, workspacePath, envFile)...)
+	createRunErr := b.run(execCtx, &createOut, &createErr, createArgs(name, b.image, req, workspacePath, envFile, dockerNetwork)...)
 	removeEnvFile()
 	if createRunErr != nil {
 		finish()
@@ -228,7 +239,11 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 }
 
 func validateSupportedPolicy(req sandbox.ExecRequest) error {
-	if req.EffectiveNetworkMode() != sandbox.NetworkNone {
+	switch req.EffectiveNetworkMode() {
+	case sandbox.NetworkNone, sandbox.NetworkOutbound:
+	case sandbox.NetworkAllowlist:
+		return fmt.Errorf("%w: network allowlist requires a destination-filtering backend", ErrUnsupportedPolicy)
+	default:
 		return fmt.Errorf("%w: network mode %q", ErrUnsupportedPolicy, req.EffectiveNetworkMode())
 	}
 	if req.EffectiveRootFilesystemMode() != sandbox.RootReadOnly {
@@ -347,12 +362,12 @@ func (b *Backend) resolveWorkspace(policy sandbox.FilesystemPolicy) (string, err
 	return filepath.Clean(resolved), nil
 }
 
-func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envFile string) []string {
+func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envFile, dockerNetwork string) []string {
 	limits := effectiveResourceLimits(req.Resources)
 	args := []string{
 		"create",
 		"--name", name,
-		"--network", "none",
+		"--network", dockerNetwork,
 		"--read-only",
 		"--memory", strconv.FormatInt(limits.MaxMemoryBytes, 10),
 		"--pids-limit", strconv.Itoa(limits.MaxProcesses),
