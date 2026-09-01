@@ -14,7 +14,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const landlockTestChildEnv = "AGENT_SANDBOX_LANDLOCK_TEST_CHILD"
+const (
+	landlockIntegrationEnv = "SANDBOX_LANDLOCK_INTEGRATION"
+	landlockTestChildEnv   = "AGENT_SANDBOX_LANDLOCK_TEST_CHILD"
+)
 
 func TestWriteAccessMaskTracksABI(t *testing.T) {
 	abi1 := writeAccessMask(1)
@@ -43,12 +46,16 @@ func TestWriteAccessMaskTracksABI(t *testing.T) {
 }
 
 func TestLandlockConfinementIntegration(t *testing.T) {
+	if os.Getenv(landlockIntegrationEnv) != "1" {
+		t.Skip("set SANDBOX_LANDLOCK_INTEGRATION=1 to run the real Landlock integration test")
+	}
+
 	probe := probePlatform()
 	if !probe.Available {
-		t.Skipf("Landlock unavailable: %s", probe.Reason)
+		t.Fatalf("Landlock unavailable on integration runner: %s", probe.Reason)
 	}
 	if !probe.WriteConfinement {
-		t.Skipf("Landlock ABI %d is below required ABI %d", probe.ABI, minimumWriteConfinementABI)
+		t.Fatalf("Landlock ABI %d is below required ABI %d", probe.ABI, minimumWriteConfinementABI)
 	}
 
 	root := t.TempDir()
