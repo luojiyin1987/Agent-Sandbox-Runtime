@@ -88,6 +88,7 @@ func WithWorkspaceRoot(root string) Option {
 type Backend struct {
 	image         string
 	workspaceRoot string
+	allowOutbound bool
 	run           commandRunner
 }
 
@@ -137,7 +138,7 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 		finish()
 		return result, err
 	}
-	if err := validateSupportedPolicy(req); err != nil {
+	if err := b.validateSupportedPolicy(req); err != nil {
 		finish()
 		return result, err
 	}
@@ -238,9 +239,13 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (sandbox
 	return result, nil
 }
 
-func validateSupportedPolicy(req sandbox.ExecRequest) error {
+func (b *Backend) validateSupportedPolicy(req sandbox.ExecRequest) error {
 	switch req.EffectiveNetworkMode() {
-	case sandbox.NetworkNone, sandbox.NetworkOutbound:
+	case sandbox.NetworkNone:
+	case sandbox.NetworkOutbound:
+		if !b.allowOutbound {
+			return fmt.Errorf("%w: outbound networking is not enabled for this backend", ErrUnsupportedPolicy)
+		}
 	case sandbox.NetworkAllowlist:
 		return fmt.Errorf("%w: network allowlist requires a destination-filtering backend", ErrUnsupportedPolicy)
 	default:
