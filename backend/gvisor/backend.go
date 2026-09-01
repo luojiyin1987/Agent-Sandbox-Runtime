@@ -10,8 +10,8 @@ import (
 const runtimeName = "runsc"
 
 type config struct {
-	workspaceRoot    *string
-	allowOutbound    bool
+	workspaceRoot     *string
+	allowOutbound     bool
 	allowMutableImage bool
 }
 
