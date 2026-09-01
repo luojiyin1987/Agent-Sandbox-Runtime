@@ -39,7 +39,7 @@ jobs:
         run: docker version
       - name: Pull integration image
         run: docker pull alpine:3.22
-      - name: Run Docker backend integration test
+      - name: Run Docker backend integration tests
         env:
           SANDBOX_DOCKER_INTEGRATION: '1'
-        run: go test -race ./backend/docker -run TestDockerBackendIntegration -count=1
+        run: go test -race ./backend/docker -run 'TestDocker.*Integration' -count=1

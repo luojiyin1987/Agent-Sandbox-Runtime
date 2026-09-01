@@ -21,7 +21,9 @@ The runtime is designed to contain common Agent-generated workload failures and 
 - CPU and memory exhaustion
 - unbounded stdout/stderr output
 - long-running or hung processes
-- privileged operations and dangerous syscalls when the backend can enforce them
+- privileged operations that depend on Linux capabilities
+- dangerous syscalls covered by Docker's built-in seccomp profile
+- privilege escalation through setuid/setgid or file capabilities after process start
 - orphaned child processes after cancellation or timeout
 - workspace path traversal and symlink escape attempts
 - workload environment variables attempting to alter Docker client configuration
@@ -39,6 +41,8 @@ The runtime is designed to contain common Agent-generated workload failures and 
 9. **Workload environment is data, not control-plane configuration.** Request environment variables must not be able to redirect or reconfigure the Docker client used by the trusted runtime.
 10. **Network access requires a trusted capability.** A request cannot grant itself Docker outbound access; the operator must explicitly enable that capability on the backend.
 11. **Broad outbound is not an allowlist.** A backend must never satisfy `NetworkAllowlist` by silently falling back to an unrestricted bridge network.
+12. **Process privilege hardening is non-optional.** Docker workloads run as the runtime's effective UID/GID with all Linux capabilities dropped, `no-new-privileges` enabled, and Docker's built-in seccomp profile explicitly selected. An untrusted request cannot relax those controls.
+13. **Security profiles must not stale-fork stronger upstream defaults.** The Docker backend does not vendor a frozen copy of Docker's built-in seccomp profile merely to customize it; any future syscall customization must preserve or tighten the then-current baseline.
 
 ## Docker workspace assumptions
 
@@ -47,6 +51,8 @@ The trusted operator must configure `WithWorkspaceRoot` as the smallest host dir
 The current Docker bind-mount implementation validates paths and symlinks against the local host filesystem. Therefore filesystem isolation with a workspace assumes the Docker daemon runs on the same host as the runtime process. Remote Docker contexts are not part of the supported workspace threat model.
 
 Read-only workspaces request recursive read-only bind semantics. A host that cannot enforce that boundary must fail container creation rather than expose writable nested mounts.
+
+Writable workspace access is also subject to ordinary Unix DAC permissions. The Docker workload uses the runtime process's numeric effective UID/GID so it does not need `CAP_DAC_OVERRIDE` merely to use a workspace owned by that runtime identity. This means the sandbox inherits the runtime identity's ordinary access to the explicitly mounted workspace, but no broader host path is exposed by that identity alone.
 
 ## Docker network assumptions
 
@@ -57,6 +63,18 @@ Each outbound execution gets a fresh user-defined bridge instead of the shared D
 `NetworkOutbound` is intentionally broad. It follows the Docker host's routing and firewall policy and can therefore include host-gateway, LAN, or other routed destinations. It must not be described or relied on as "internet only".
 
 Destination allowlists are not implemented by the current Docker backend. `NetworkAllowlist` fails closed before any Docker call. Enforcing destination policy safely requires a trusted egress firewall or proxy and explicit handling of DNS resolution, address changes, and bypass paths.
+
+## Docker process-hardening assumptions
+
+The Docker backend explicitly requests the runtime process's effective numeric UID/GID, `--cap-drop ALL`, `no-new-privileges=true`, and `seccomp=builtin` for every execution.
+
+Matching the runtime UID/GID keeps filesystem permission checks aligned with the trusted process that granted the workspace. This avoids retaining `CAP_DAC_OVERRIDE` just to make a normal user-owned bind mount writable. If the runtime itself runs as root, the sandbox receives UID 0 but still has an empty effective capability set and remains subject to `no-new-privileges`, seccomp, read-only root, and the other isolation layers.
+
+Dropping all capabilities removes Docker's ordinary capability allowlist rather than trying to predict which privileged capability an Agent-generated command might abuse. `no-new-privileges` prevents a process from gaining privileges through exec-time mechanisms such as setuid/setgid binaries or file capabilities. Docker's built-in seccomp profile runs in filter mode and blocks a set of dangerous or rarely needed syscalls while retaining broad application compatibility.
+
+These controls are defense in depth, not a VM-strength boundary. Seccomp only filters syscalls; capabilities govern privileged kernel operations; namespaces isolate selected kernel resources; filesystem and network policies constrain different surfaces. Passing one layer does not imply another layer is redundant.
+
+The runtime intentionally does not expose `--privileged`, capability additions, a request-selected container UID/GID, `seccomp=unconfined`, or a request-controlled seccomp profile. A custom seccomp JSON replaces Docker's built-in profile rather than extending it, so a stale vendored profile could accidentally lose later upstream hardening.
 
 ## Out of scope for the initial Docker backend
 
@@ -83,7 +101,9 @@ Sandbox Runtime control plane (trusted)
         |
         +-- trusted image
         +-- trusted workspace root
+        +-- runtime effective UID/GID
         +-- trusted outbound-network capability
+        +-- mandatory process-hardening baseline
         +-- trusted Docker client environment
         |
         v
