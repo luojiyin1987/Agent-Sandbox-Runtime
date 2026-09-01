@@ -13,6 +13,17 @@ import (
 
 const outboundNetworkLabel = "agent-sandbox-runtime=execution"
 
+// WithOutboundNetwork grants this backend permission to honor
+// NetworkOutbound requests. The zero-value backend remains fail-closed: a
+// request cannot grant itself network access without this trusted operator
+// capability.
+func WithOutboundNetwork() Option {
+	return func(b *Backend) error {
+		b.allowOutbound = true
+		return nil
+	}
+}
+
 // prepareNetwork returns the Docker network name that should be attached to a
 // container plus a cleanup function. NetworkNone keeps Docker's strongest
 // built-in isolation. NetworkOutbound gets a fresh user-defined bridge so a
