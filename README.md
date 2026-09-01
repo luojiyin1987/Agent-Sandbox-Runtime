@@ -59,7 +59,7 @@ The Docker backend uses one fresh container per execution and requires the Docke
 
 ```go
 runtime, err := dockerbackend.New(
-    "alpine:3.22",
+    "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
     dockerbackend.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
     dockerbackend.WithOutboundNetwork(),
 )
@@ -87,6 +87,20 @@ result, err := runtime.Execute(context.Background(), sandbox.ExecRequest{
     },
 })
 ```
+
+### Image identity
+
+Docker and gVisor backends require an immutable `sha256` image reference by default:
+
+```text
+name@sha256:<64 lowercase hex>
+```
+
+A human-readable tag may be retained before the digest, for example `alpine:3.22@sha256:...`, but the digest is authoritative. Mutable references such as `alpine:3.22` or `alpine:latest` are rejected so a registry-side tag update cannot silently change the sandbox image without a runtime configuration change.
+
+For development or compatibility workflows, a trusted operator may explicitly opt out with `dockerbackend.WithMutableImageReference()` or `gvisor.WithMutableImageReference()`. This is intentionally not the default production boundary.
+
+Digest pinning provides **configuration integrity**, not provenance or authenticity. It does not verify who built or signed the image and does not replace registry trust, signature verification, SBOMs, or provenance policy.
 
 ### Resource limits
 
@@ -168,12 +182,12 @@ The gVisor backend implements the same `sandbox.Runtime` interface but forces Do
 
 ```go
 runtime, err := gvisor.New(
-    "alpine:3.22",
+    "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
     gvisor.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
 )
 ```
 
-`backend/gvisor` deliberately does not copy the Docker lifecycle implementation. It reuses request validation, cleanup, resource flags, workspace validation, filesystem policy, network policy, environment transport, and output/timeout semantics, then adds trusted `--runtime runsc` selection.
+`backend/gvisor` deliberately does not copy the Docker lifecycle implementation. It reuses request validation, cleanup, resource flags, workspace validation, filesystem policy, network policy, environment transport, image-reference policy, and output/timeout semantics, then adds trusted `--runtime runsc` selection.
 
 This matters because gVisor is not merely another seccomp profile. `runsc` places a userspace application kernel between the workload and the host kernel, reducing direct host-kernel syscall exposure while preserving the OCI/Docker integration model.
 
@@ -189,7 +203,7 @@ The shared conformance suite in `internal/conformance` runs against both Docker 
 
 Docker-specific assertions such as host cgroup file values and workload-visible `/proc/self/status` seccomp fields remain Docker-specific. In particular, loading OCI seccomp filters inside a gVisor sandbox is controlled by runsc's `--oci-seccomp` runtime configuration; it is not treated as a cross-backend `/proc` invariant.
 
-CI pins gVisor `release-20260817.0`, verifies the release archive SHA256 before installation, registers `runsc` with Docker, performs a real `--runtime=runsc` preflight, and runs the full shared conformance suite.
+CI pins gVisor `release-20260817.0`, verifies the release archive SHA256 before installation, registers `runsc` with Docker, performs a real `--runtime=runsc` preflight using the pinned sandbox-image digest, and runs the full shared conformance suite.
 
 See [backend/gvisor/README.md](backend/gvisor/README.md) for the backend-specific boundary.
 
