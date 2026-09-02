@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -211,11 +212,11 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (result 
 		finish()
 		return result, err
 	}
+	defer removeEnvFile()
 
 	var createOut bytes.Buffer
 	var createErr bytes.Buffer
 	createRunErr := b.run(execCtx, &createOut, &createErr, createArgs(name, b.image, req, workspacePath, envFile, dockerNetwork)...)
-	removeEnvFile()
 	if createRunErr != nil {
 		finish()
 		if contextErr := execCtx.Err(); contextErr != nil {
@@ -295,6 +296,10 @@ func (b *Backend) validateSupportedPolicy(req sandbox.ExecRequest) error {
 func validateResourceLimits(limits sandbox.ResourceLimits) error {
 	if limits.MaxMemoryBytes > 0 && limits.MaxMemoryBytes < minimumMemoryBytes {
 		return fmt.Errorf("%w: max memory must be at least %d bytes for Docker", sandbox.ErrInvalidRequest, minimumMemoryBytes)
+	}
+	maxMilliCPUs := int64(runtime.NumCPU()) * 1000
+	if limits.MilliCPUs > maxMilliCPUs {
+		return fmt.Errorf("%w: milli-CPUs must not exceed node capacity %d", sandbox.ErrInvalidRequest, maxMilliCPUs)
 	}
 	return nil
 }
@@ -470,7 +475,7 @@ func (b *Backend) inspectState(name string) (containerState, error) {
 	}
 
 	fields := strings.Fields(stdout.String())
-	if len(fields) != 2 {
+	if len(fields) < 2 {
 		return containerState{}, fmt.Errorf("parse docker state: expected exit code and OOM flag, got %q", strings.TrimSpace(stdout.String()))
 	}
 	exitCode, err := strconv.Atoi(fields[0])
@@ -485,15 +490,19 @@ func (b *Backend) inspectState(name string) (containerState, error) {
 }
 
 func (b *Backend) removeContainer(name string) error {
+	return b.removeDockerResource("container", name, "rm", "--force", name)
+}
+
+func (b *Backend) removeDockerResource(resourceType, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
 	var stderr bytes.Buffer
-	if err := b.run(ctx, io.Discard, &stderr, "rm", "--force", name); err != nil {
+	if err := b.run(ctx, io.Discard, &stderr, args...); err != nil {
 		if dockerResourceMissing(stderr.String()) {
 			return nil
 		}
-		return fmt.Errorf("%w: remove container %q: %v%s", ErrCleanup, name, err, dockerErrorSuffix(stderr.String()))
+		return fmt.Errorf("%w: remove %s %q: %v%s", ErrCleanup, resourceType, name, err, dockerErrorSuffix(stderr.String()))
 	}
 	return nil
 }
@@ -515,11 +524,15 @@ func dockerErrorSuffix(stderr string) string {
 }
 
 func containerName() (string, error) {
+	return generateRandomName("agent-sandbox-")
+}
+
+func generateRandomName(prefix string) (string, error) {
 	var random [8]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return "", err
 	}
-	return "agent-sandbox-" + hex.EncodeToString(random[:]), nil
+	return prefix + hex.EncodeToString(random[:]), nil
 }
 
 func resultForContext(result sandbox.ExecResult, err error) sandbox.ExecResult {
@@ -579,7 +592,12 @@ func (w captureWriter) Write(p []byte) (int, error) {
 		} else {
 			_, _ = w.capture.stdout.Write(p)
 		}
-		w.capture.remaining -= int64(len(p))
+		written := int64(len(p))
+		if written >= w.capture.remaining {
+			w.capture.remaining = 0
+		} else {
+			w.capture.remaining -= written
+		}
 	}
 	if len(p) < originalLen {
 		w.capture.truncated = true
