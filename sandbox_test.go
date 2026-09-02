@@ -25,6 +25,7 @@ func TestExecRequestValidation(t *testing.T) {
 		req  ExecRequest
 	}{
 		{name: "missing command", req: ExecRequest{}},
+		{name: "argument with NUL", req: ExecRequest{Command: "true", Args: []string{"bad\x00argument"}}},
 		{name: "negative timeout", req: ExecRequest{Command: "true", Timeout: -time.Second}},
 		{name: "negative memory", req: ExecRequest{Command: "true", Resources: ResourceLimits{MaxMemoryBytes: -1}}},
 		{name: "allow entries without mode", req: ExecRequest{Command: "true", Network: NetworkPolicy{Allow: []string{"example.com"}}}},
