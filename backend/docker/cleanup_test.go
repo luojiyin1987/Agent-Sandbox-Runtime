@@ -1,9 +1,11 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -73,6 +75,33 @@ func TestExecuteReturnsContainerCleanupFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "daemon refused container removal") {
 		t.Fatalf("Execute() error = %q, want Docker cleanup diagnostic", err)
+	}
+	if got := backend.Stats().CleanupFailures; got != 1 {
+		t.Fatalf("CleanupFailures = %d, want 1", got)
+	}
+}
+
+func TestCleanupFailureWritesStructuredLog(t *testing.T) {
+	var logs bytes.Buffer
+	fake := &cleanupFailureRunner{containerRemoveErr: errors.New("remove failed")}
+	backend := &Backend{
+		image:  "alpine:3.22",
+		run:    fake.run,
+		logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	}
+
+	_, err := backend.Execute(context.Background(), sandbox.ExecRequest{Command: "true"})
+	if !errors.Is(err, ErrCleanup) {
+		t.Fatalf("Execute() error = %v, want ErrCleanup", err)
+	}
+	for _, want := range []string{
+		`"msg":"Docker resource cleanup failed"`,
+		`"resource_type":"container"`,
+		`"resource_name":"agent-sandbox-`,
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("structured log %q missing %q", logs.String(), want)
+		}
 	}
 }
 
