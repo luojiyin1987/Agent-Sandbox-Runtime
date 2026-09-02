@@ -60,15 +60,15 @@ The Docker backend uses one fresh container per execution and requires the Docke
 ```go
 runtime, err := dockerbackend.New(
     "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
-	dockerbackend.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
-	dockerbackend.WithOutboundNetwork(),
-	dockerbackend.WithMaxConcurrentSandboxes(4),
-	dockerbackend.WithAggregateResourceLimits(sandbox.ResourceLimits{
+    dockerbackend.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
+    dockerbackend.WithOutboundNetwork(),
+	dockerbackend.WithAdmissionLimits(sandbox.AdmissionLimits{
+		MaxConcurrent: 4,
 		MaxMemoryBytes: 512 << 20,
 		MaxProcesses:   128,
 		MaxOutputBytes: 4 << 20,
-		MilliCPUs:      2000,
-	}),
+		MilliCPUs:      1000,
+    }),
 )
 if err != nil {
     panic(err)
@@ -126,13 +126,15 @@ Docker requires an explicit memory limit to be at least 6 MiB; smaller non-zero 
 ### Resource admission
 
 Each backend instance allows one active sandbox by default.
-`WithMaxConcurrentSandboxes` sets a different positive limit.
-Excess requests return `sandbox.ErrTooManyConcurrent` without creating Docker resources.
+Default totals are 256 MiB, 64 PIDs, 1 MiB output, and one CPU.
+Temporary capacity conflicts return `sandbox.ErrTooManyConcurrent`.
+The backend does not create Docker resources for rejected requests.
 
-`WithAggregateResourceLimits` sets optional totals for active executions.
-It supports memory, PID, output, and CPU totals.
-Each zero field disables that aggregate dimension.
+`WithAdmissionLimits` sets trusted totals for active executions.
+It also sets the maximum active execution count.
+Each zero field uses its secure default.
 Reservations use effective request limits and remain active through cleanup.
+Requests above trusted totals return `sandbox.ErrResourceLimitExceeded`.
 
 The admission pool belongs to one backend instance.
 Multiple runtime processes need an external coordinator or a shared parent cgroup.
@@ -150,7 +152,7 @@ Docker and gVisor integration tests verify attached output with this setting.
 Cleanup failures include the resource type, resource name, duration, and error.
 Admission rejections include the requested effective limits.
 
-`Stats` returns cumulative cleanup-failure and admission-rejection counters.
+`Stats` returns cumulative counters and current resource reservations.
 Metric exporters can sample these counters without parsing logs.
 
 ### Filesystem isolation
