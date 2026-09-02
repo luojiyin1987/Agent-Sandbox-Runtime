@@ -30,10 +30,18 @@ type ExecRequest struct {
 // ResourceLimits are backend-neutral upper bounds. A zero value means the
 // backend's safe default; it must never mean "unlimited".
 type ResourceLimits struct {
+	// MaxMemoryBytes is the maximum resident set size in bytes.
+	// Zero uses the backend default (256 MiB for Docker).
 	MaxMemoryBytes int64
-	MaxProcesses   int
+	// MaxProcesses is the maximum number of processes (PIDs) in the container.
+	// Zero uses the backend default (64 for Docker).
+	MaxProcesses int
+	// MaxOutputBytes caps the combined captured stdout and stderr in bytes.
+	// Excess bytes are discarded and OutputTruncated is set. Zero uses 1 MiB.
 	MaxOutputBytes int64
-	MilliCPUs      int64
+	// MilliCPUs is the CPU quota in thousandths of a CPU core (1000 = 1 core).
+	// Zero uses the backend default (1000 for Docker).
+	MilliCPUs int64
 }
 
 // NetworkMode describes network access granted to a workload.
@@ -88,13 +96,23 @@ const (
 
 // ExecResult contains bounded output and execution metadata.
 type ExecResult struct {
-	ExitCode        int
-	Stdout          []byte
-	Stderr          []byte
+	// ExitCode is the workload process exit code. It is -1 before the workload
+	// starts; a non-negative value is always a completed workload result, not
+	// a runtime error.
+	ExitCode int
+	// Stdout is the captured standard output, bounded by MaxOutputBytes.
+	Stdout []byte
+	// Stderr is the captured standard error, bounded by MaxOutputBytes.
+	Stderr []byte
+	// OutputTruncated is true when stdout or stderr exceeded MaxOutputBytes
+	// and excess bytes were discarded.
 	OutputTruncated bool
-	StartedAt       time.Time
-	Duration        time.Duration
-	Termination     TerminationReason
+	// StartedAt records when the workload execution began.
+	StartedAt time.Time
+	// Duration is the wall-clock time from start to finish.
+	Duration time.Duration
+	// Termination classifies why the execution stopped.
+	Termination TerminationReason
 }
 
 var ErrInvalidRequest = errors.New("invalid sandbox request")
