@@ -17,6 +17,14 @@ func TestNewRejectsInvalidWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestNewReturnsOptionError(t *testing.T) {
+	want := errors.New("option failed")
+	_, err := New(testImageDigest, func(*config) error { return want })
+	if !errors.Is(err, want) {
+		t.Fatalf("New() error = %v, want %v", err, want)
+	}
+}
+
 func TestNewRejectsMutableImageReferenceByDefault(t *testing.T) {
 	_, err := New("alpine:3.22")
 	if !errors.Is(err, sandbox.ErrInvalidRequest) {
