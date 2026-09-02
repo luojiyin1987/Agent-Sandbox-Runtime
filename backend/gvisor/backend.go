@@ -2,6 +2,7 @@ package gvisor
 
 import (
 	"context"
+	"log/slog"
 
 	sandbox "github.com/luojiyin1987/Agent-Sandbox-Runtime"
 	dockerbackend "github.com/luojiyin1987/Agent-Sandbox-Runtime/backend/docker"
@@ -10,9 +11,7 @@ import (
 const runtimeName = "runsc"
 
 type config struct {
-	workspaceRoot     *string
-	allowOutbound     bool
-	allowMutableImage bool
+	dockerOptions []dockerbackend.Option
 }
 
 // Option configures trusted gVisor backend state.
@@ -23,7 +22,7 @@ type Option func(*config) error
 // Docker control-plane implementation before it is passed to runsc.
 func WithWorkspaceRoot(root string) Option {
 	return func(cfg *config) error {
-		cfg.workspaceRoot = &root
+		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithWorkspaceRoot(root))
 		return nil
 	}
 }
@@ -33,7 +32,7 @@ func WithWorkspaceRoot(root string) Option {
 // closed exactly as they do in the Docker backend.
 func WithOutboundNetwork() Option {
 	return func(cfg *config) error {
-		cfg.allowOutbound = true
+		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithOutboundNetwork())
 		return nil
 	}
 }
@@ -43,7 +42,31 @@ func WithOutboundNetwork() Option {
 // sha256 digest requirement.
 func WithMutableImageReference() Option {
 	return func(cfg *config) error {
-		cfg.allowMutableImage = true
+		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithMutableImageReference())
+		return nil
+	}
+}
+
+// WithMaxConcurrentSandboxes sets the maximum executions for one backend instance.
+func WithMaxConcurrentSandboxes(maximum int) Option {
+	return func(cfg *config) error {
+		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithMaxConcurrentSandboxes(maximum))
+		return nil
+	}
+}
+
+// WithAggregateResourceLimits sets optional totals across active executions.
+func WithAggregateResourceLimits(limits sandbox.ResourceLimits) Option {
+	return func(cfg *config) error {
+		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithAggregateResourceLimits(limits))
+		return nil
+	}
+}
+
+// WithLogger enables structured backend event logs.
+func WithLogger(logger *slog.Logger) Option {
+	return func(cfg *config) error {
+		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithLogger(logger))
 		return nil
 	}
 }
@@ -68,25 +91,20 @@ func New(image string, options ...Option) (*Backend, error) {
 		}
 	}
 
-	dockerOptions := make([]dockerbackend.Option, 0, 4)
-	if cfg.workspaceRoot != nil {
-		dockerOptions = append(dockerOptions, dockerbackend.WithWorkspaceRoot(*cfg.workspaceRoot))
-	}
-	if cfg.allowOutbound {
-		dockerOptions = append(dockerOptions, dockerbackend.WithOutboundNetwork())
-	}
-	if cfg.allowMutableImage {
-		dockerOptions = append(dockerOptions, dockerbackend.WithMutableImageReference())
-	}
 	// Add runtime selection last so gVisor.New always forces runsc regardless
 	// of future trusted Docker options added above.
-	dockerOptions = append(dockerOptions, dockerbackend.WithContainerRuntime(runtimeName))
+	cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithContainerRuntime(runtimeName))
 
-	delegate, err := dockerbackend.New(image, dockerOptions...)
+	delegate, err := dockerbackend.New(image, cfg.dockerOptions...)
 	if err != nil {
 		return nil, err
 	}
 	return &Backend{delegate: delegate}, nil
+}
+
+// Stats returns a snapshot of cumulative backend counters.
+func (b *Backend) Stats() dockerbackend.Stats {
+	return b.delegate.Stats()
 }
 
 // Execute runs one sandbox request inside the gVisor application kernel while
