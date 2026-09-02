@@ -44,6 +44,16 @@ type ResourceLimits struct {
 	MilliCPUs int64
 }
 
+// AdmissionLimits are trusted totals across active executions.
+// Zero fields use backend defaults and never disable enforcement.
+type AdmissionLimits struct {
+	MaxConcurrent  int
+	MaxMemoryBytes int64
+	MaxProcesses   int
+	MaxOutputBytes int64
+	MilliCPUs      int64
+}
+
 // NetworkMode describes network access granted to a workload.
 type NetworkMode string
 
@@ -116,8 +126,9 @@ type ExecResult struct {
 }
 
 var (
-	ErrInvalidRequest    = errors.New("invalid sandbox request")
-	ErrTooManyConcurrent = errors.New("too many concurrent sandbox executions")
+	ErrInvalidRequest        = errors.New("invalid sandbox request")
+	ErrTooManyConcurrent     = errors.New("too many concurrent sandbox executions")
+	ErrResourceLimitExceeded = errors.New("sandbox request exceeds trusted resource limits")
 )
 
 // Validate rejects ambiguous or unsafe request shapes before a backend sees them.
