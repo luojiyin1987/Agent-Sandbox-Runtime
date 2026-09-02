@@ -26,7 +26,7 @@ func TestNewReturnsOptionError(t *testing.T) {
 }
 
 func TestNewRejectsInvalidAdmissionConfig(t *testing.T) {
-	_, err := New(testImageDigest, WithMaxConcurrentSandboxes(0))
+	_, err := New(testImageDigest, WithAdmissionLimits(sandbox.AdmissionLimits{MaxConcurrent: -1}))
 	if !errors.Is(err, sandbox.ErrInvalidRequest) {
 		t.Fatalf("New() error = %v, want ErrInvalidRequest", err)
 	}
