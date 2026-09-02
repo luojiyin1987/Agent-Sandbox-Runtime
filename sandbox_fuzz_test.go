@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,8 +40,35 @@ func FuzzValidate(f *testing.F) {
 			request.Network.Allow = []string{"example.com:443"}
 		}
 
-		if err := request.Validate(); err != nil && !errors.Is(err, ErrInvalidRequest) {
-			t.Fatalf("Validate() error = %v, want ErrInvalidRequest", err)
+		err := request.Validate()
+		if err != nil {
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidRequest", err)
+			}
+			return
+		}
+		if request.Command == "" || strings.ContainsRune(argument, '\x00') || request.Timeout < 0 {
+			t.Fatalf("Validate() accepted invalid basic fields: %+v", request)
+		}
+		if memory < 0 || request.Resources.MaxProcesses < 0 || output < 0 || milliCPUs < 0 {
+			t.Fatalf("Validate() accepted negative resources: %+v", request.Resources)
+		}
+		switch request.Network.Mode {
+		case "", NetworkNone, NetworkOutbound:
+			if len(request.Network.Allow) != 0 {
+				t.Fatalf("Validate() accepted allow entries without allowlist mode")
+			}
+		case NetworkAllowlist:
+			if len(request.Network.Allow) == 0 {
+				t.Fatalf("Validate() accepted an empty allowlist")
+			}
+		default:
+			t.Fatalf("Validate() accepted network mode %q", request.Network.Mode)
+		}
+		switch request.Filesystem.Root {
+		case "", RootReadOnly, RootReadWrite:
+		default:
+			t.Fatalf("Validate() accepted root mode %q", request.Filesystem.Root)
 		}
 	})
 }
