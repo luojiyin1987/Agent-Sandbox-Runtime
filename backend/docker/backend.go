@@ -104,8 +104,7 @@ type Backend struct {
 	allowOutbound     bool
 	allowMutableImage bool
 	run               commandRunner
-	maxConcurrent     int
-	aggregateLimits   sandbox.ResourceLimits
+	admissionLimits   sandbox.AdmissionLimits
 	admissionOnce     sync.Once
 	admission         *admissionPool
 	logger            *slog.Logger
@@ -115,8 +114,13 @@ type Backend struct {
 
 // Stats contains cumulative backend event counters.
 type Stats struct {
-	CleanupFailures   uint64
-	AdmissionRejected uint64
+	CleanupFailures     uint64
+	AdmissionRejected   uint64
+	ActiveExecutions    int
+	ReservedMemoryBytes int64
+	ReservedProcesses   int64
+	ReservedOutputBytes int64
+	ReservedMilliCPUs   int64
 }
 
 var _ sandbox.Runtime = (*Backend)(nil)
@@ -131,9 +135,9 @@ func New(image string, options ...Option) (*Backend, error) {
 	}
 
 	backend := &Backend{
-		image:         image,
-		run:           runDocker,
-		maxConcurrent: defaultMaxConcurrentSandboxes,
+		image:           image,
+		run:             runDocker,
+		admissionLimits: defaultAdmissionLimits(),
 	}
 	for _, option := range options {
 		if option == nil {
@@ -191,10 +195,14 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (result 
 
 	limits := effectiveResourceLimits(req.Resources)
 	admission := b.admissionController()
-	if !admission.tryAcquire(limits) {
-		b.recordAdmissionRejection(limits)
+	decision := admission.tryAcquire(limits)
+	if decision.status != admissionAccepted {
+		b.recordAdmissionRejection(limits, decision)
 		finish()
-		return result, sandbox.ErrTooManyConcurrent
+		if decision.status == admissionRequestTooLarge {
+			return result, fmt.Errorf("%w: %s", sandbox.ErrResourceLimitExceeded, decision.reason)
+		}
+		return result, fmt.Errorf("%w: %s capacity is exhausted", sandbox.ErrTooManyConcurrent, decision.reason)
 	}
 	defer admission.release(limits)
 
@@ -290,7 +298,11 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (result 
 
 func (b *Backend) admissionController() *admissionPool {
 	b.admissionOnce.Do(func() {
-		b.admission = newAdmissionPool(b.maxConcurrent, b.aggregateLimits)
+		limits := b.admissionLimits
+		if limits.MaxConcurrent == 0 {
+			limits = defaultAdmissionLimits()
+		}
+		b.admission = newAdmissionPool(limits)
 	})
 	return b.admission
 }
@@ -306,21 +318,30 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// Stats returns a snapshot of cumulative backend counters.
+// Stats returns counters and current resource reservations.
 func (b *Backend) Stats() Stats {
+	reservations := b.admissionController().snapshot()
 	return Stats{
-		CleanupFailures:   b.cleanupFailures.Load(),
-		AdmissionRejected: b.admissionRejected.Load(),
+		CleanupFailures:     b.cleanupFailures.Load(),
+		AdmissionRejected:   b.admissionRejected.Load(),
+		ActiveExecutions:    reservations.active,
+		ReservedMemoryBytes: reservations.memoryBytes,
+		ReservedProcesses:   reservations.processes,
+		ReservedOutputBytes: reservations.outputBytes,
+		ReservedMilliCPUs:   reservations.milliCPUs,
 	}
 }
 
-func (b *Backend) recordAdmissionRejection(limits sandbox.ResourceLimits) {
+func (b *Backend) recordAdmissionRejection(limits sandbox.ResourceLimits, decision admissionDecision) {
 	b.admissionRejected.Add(1)
 	if b.logger != nil {
 		b.logger.Warn(
 			"Docker sandbox admission rejected",
+			"reason", decision.reason,
+			"permanent", decision.status == admissionRequestTooLarge,
 			"memory_bytes", limits.MaxMemoryBytes,
 			"processes", limits.MaxProcesses,
+			"output_bytes", limits.MaxOutputBytes,
 			"milli_cpus", limits.MilliCPUs,
 		)
 	}
