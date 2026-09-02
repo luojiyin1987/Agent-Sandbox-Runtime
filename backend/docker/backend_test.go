@@ -198,6 +198,9 @@ func TestExecuteRemovesEnvironmentFileAfterPanic(t *testing.T) {
 	if _, err := os.Stat(envFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("environment file still exists after panic: %v", err)
 	}
+	if stats := backend.Stats(); stats.ActiveExecutions != 0 || stats.ReservedMemoryBytes != 0 || stats.ReservedProcesses != 0 || stats.ReservedOutputBytes != 0 || stats.ReservedMilliCPUs != 0 {
+		t.Fatalf("Stats() after panic = %+v", stats)
+	}
 }
 
 func TestExecuteCompilesPartialResourceLimits(t *testing.T) {
