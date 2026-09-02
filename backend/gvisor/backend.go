@@ -16,14 +16,15 @@ type config struct {
 }
 
 // Option configures trusted gVisor backend state.
-type Option func(*config)
+type Option func(*config) error
 
 // WithWorkspaceRoot grants the same trusted workspace-root capability as the
 // Docker backend. The selected host subtree is still validated by the shared
 // Docker control-plane implementation before it is passed to runsc.
 func WithWorkspaceRoot(root string) Option {
-	return func(cfg *config) {
+	return func(cfg *config) error {
 		cfg.workspaceRoot = &root
+		return nil
 	}
 }
 
@@ -31,8 +32,9 @@ func WithWorkspaceRoot(root string) Option {
 // networking requests. Destination allowlists remain unsupported and fail
 // closed exactly as they do in the Docker backend.
 func WithOutboundNetwork() Option {
-	return func(cfg *config) {
+	return func(cfg *config) error {
 		cfg.allowOutbound = true
+		return nil
 	}
 }
 
@@ -40,8 +42,9 @@ func WithOutboundNetwork() Option {
 // a mutable image tag. Production callers should keep the default immutable
 // sha256 digest requirement.
 func WithMutableImageReference() Option {
-	return func(cfg *config) {
+	return func(cfg *config) error {
 		cfg.allowMutableImage = true
+		return nil
 	}
 }
 
@@ -59,7 +62,9 @@ func New(image string, options ...Option) (*Backend, error) {
 	cfg := config{}
 	for _, option := range options {
 		if option != nil {
-			option(&cfg)
+			if err := option(&cfg); err != nil {
+				return nil, err
+			}
 		}
 	}
 
