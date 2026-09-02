@@ -19,7 +19,7 @@ The runtime is designed to contain common Agent-generated workload failures and 
 - unexpected outbound network access when networking has not been granted
 - fork bombs and process exhaustion
 - CPU and memory exhaustion
-- unbounded stdout/stderr output
+- unbounded stdout/stderr capture or Docker log storage
 - long-running or hung processes
 - privileged operations that depend on Linux capabilities
 - dangerous syscalls covered by the selected backend's isolation layers
@@ -34,7 +34,7 @@ The runtime is designed to contain common Agent-generated workload failures and 
 2. **Zero is not unlimited.** A backend must apply safe resource defaults when limits are omitted.
 3. **Policy validation precedes execution.** Invalid or unsupported policy must be rejected before starting a workload.
 4. **Cancellation is terminal.** A cancelled or timed-out execution must not keep child processes running.
-5. **Output is bounded.** Backends must cap captured stdout/stderr rather than allow unbounded memory growth.
+5. **Output is bounded.** Backends cap captured output. Docker logging must not create an unbounded host copy.
 6. **No silent downgrade.** A backend must return an error when it cannot enforce a requested security boundary.
 7. **Backend details do not weaken the contract.** Docker, gVisor, or future backends must satisfy the same backend-neutral conformance semantics even when their internal kernel interfaces differ.
 8. **Workspace roots are capabilities.** An untrusted request may select only inside a trusted backend-configured workspace root; it cannot supply an arbitrary host bind source or container mount target.
@@ -45,6 +45,27 @@ The runtime is designed to contain common Agent-generated workload failures and 
 13. **Security profiles must not stale-fork stronger upstream defaults.** The Docker control plane does not vendor a frozen copy of Docker's built-in seccomp profile merely to customize it; any future syscall customization must preserve or tighten the then-current baseline.
 14. **Experiments are not backend guarantees.** A standalone security experiment does not strengthen the production runtime contract until its lifecycle, platform requirements, and conformance semantics are explicitly integrated and tested through the backend.
 15. **Backend identity is trusted configuration.** An `ExecRequest` cannot choose the OCI runtime. The gVisor backend fixes runtime selection to the operator-installed `runsc` runtime.
+16. **Concurrent execution is bounded.** Each backend instance rejects work when its admission capacity is full.
+
+## Resource admission boundary
+
+Each Docker or gVisor backend instance allows one active execution by default.
+
+The operator can set a different limit with `WithMaxConcurrentSandboxes`.
+The operator can also set aggregate memory, PID, output, and CPU budgets.
+Admission uses the effective request limits, including default values.
+The backend holds each reservation through resource cleanup.
+
+This control is local to one backend instance.
+Separate processes do not share the same admission pool.
+A multi-process host needs an external coordinator or a shared parent cgroup.
+These host controls must cover all runtime processes on that host.
+
+## Docker logging boundary
+
+Each sandbox container uses Docker's `none` logging driver.
+The runtime still captures attached stdout and stderr within `MaxOutputBytes`.
+Docker does not retain a second persistent copy of workload output.
 
 ## Docker workspace assumptions
 
