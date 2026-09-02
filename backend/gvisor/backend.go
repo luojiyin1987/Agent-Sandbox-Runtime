@@ -47,18 +47,10 @@ func WithMutableImageReference() Option {
 	}
 }
 
-// WithMaxConcurrentSandboxes sets the maximum executions for one backend instance.
-func WithMaxConcurrentSandboxes(maximum int) Option {
+// WithAdmissionLimits sets trusted totals across active executions.
+func WithAdmissionLimits(limits sandbox.AdmissionLimits) Option {
 	return func(cfg *config) error {
-		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithMaxConcurrentSandboxes(maximum))
-		return nil
-	}
-}
-
-// WithAggregateResourceLimits sets optional totals across active executions.
-func WithAggregateResourceLimits(limits sandbox.ResourceLimits) Option {
-	return func(cfg *config) error {
-		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithAggregateResourceLimits(limits))
+		cfg.dockerOptions = append(cfg.dockerOptions, dockerbackend.WithAdmissionLimits(limits))
 		return nil
 	}
 }
@@ -102,7 +94,7 @@ func New(image string, options ...Option) (*Backend, error) {
 	return &Backend{delegate: delegate}, nil
 }
 
-// Stats returns a snapshot of cumulative backend counters.
+// Stats returns counters and current resource reservations.
 func (b *Backend) Stats() dockerbackend.Stats {
 	return b.delegate.Stats()
 }
