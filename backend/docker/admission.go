@@ -2,6 +2,7 @@ package docker
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 
 	sandbox "github.com/luojiyin1987/Agent-Sandbox-Runtime"
@@ -9,78 +10,158 @@ import (
 
 const defaultMaxConcurrentSandboxes = 1
 
+type admissionStatus uint8
+
+const (
+	admissionAccepted admissionStatus = iota
+	admissionBusy
+	admissionRequestTooLarge
+)
+
+type admissionDecision struct {
+	status admissionStatus
+	reason string
+}
+
 type admissionPool struct {
-	mu            sync.Mutex
-	maxConcurrent int
-	aggregate     sandbox.ResourceLimits
-	active        int
-	memoryBytes   int64
-	processes     int64
-	outputBytes   int64
-	milliCPUs     int64
+	mu          sync.Mutex
+	limits      sandbox.AdmissionLimits
+	active      int
+	memoryBytes int64
+	processes   int64
+	outputBytes int64
+	milliCPUs   int64
 }
 
-func newAdmissionPool(maxConcurrent int, aggregate sandbox.ResourceLimits) *admissionPool {
-	if maxConcurrent == 0 {
-		maxConcurrent = defaultMaxConcurrentSandboxes
+type reservationStats struct {
+	active      int
+	memoryBytes int64
+	processes   int64
+	outputBytes int64
+	milliCPUs   int64
+}
+
+func defaultAdmissionLimits() sandbox.AdmissionLimits {
+	return sandbox.AdmissionLimits{
+		MaxConcurrent:  defaultMaxConcurrentSandboxes,
+		MaxMemoryBytes: defaultMemoryBytes,
+		MaxProcesses:   defaultProcesses,
+		MaxOutputBytes: defaultMaxOutputBytes,
+		MilliCPUs:      defaultMilliCPUs,
 	}
-	return &admissionPool{maxConcurrent: maxConcurrent, aggregate: aggregate}
 }
 
-func (p *admissionPool) tryAcquire(limits sandbox.ResourceLimits) bool {
+func normalizeAdmissionLimits(limits sandbox.AdmissionLimits) (sandbox.AdmissionLimits, error) {
+	if limits.MaxConcurrent < 0 || limits.MaxMemoryBytes < 0 || limits.MaxProcesses < 0 || limits.MaxOutputBytes < 0 || limits.MilliCPUs < 0 {
+		return sandbox.AdmissionLimits{}, fmt.Errorf("%w: admission limits must not be negative", sandbox.ErrInvalidRequest)
+	}
+
+	defaults := defaultAdmissionLimits()
+	if limits.MaxConcurrent == 0 {
+		limits.MaxConcurrent = defaults.MaxConcurrent
+	}
+	if limits.MaxMemoryBytes == 0 {
+		limits.MaxMemoryBytes = defaults.MaxMemoryBytes
+	}
+	if limits.MaxProcesses == 0 {
+		limits.MaxProcesses = defaults.MaxProcesses
+	}
+	if limits.MaxOutputBytes == 0 {
+		limits.MaxOutputBytes = defaults.MaxOutputBytes
+	}
+	if limits.MilliCPUs == 0 {
+		limits.MilliCPUs = defaults.MilliCPUs
+	}
+	maxMilliCPUs := int64(runtime.NumCPU()) * 1000
+	if limits.MilliCPUs > maxMilliCPUs {
+		return sandbox.AdmissionLimits{}, fmt.Errorf("%w: admission milli-CPUs must not exceed node capacity %d", sandbox.ErrInvalidRequest, maxMilliCPUs)
+	}
+	return limits, nil
+}
+
+func newAdmissionPool(limits sandbox.AdmissionLimits) *admissionPool {
+	if limits.MaxConcurrent == 0 {
+		limits = defaultAdmissionLimits()
+	}
+	return &admissionPool{limits: limits}
+}
+
+func (p *admissionPool) tryAcquire(request sandbox.ResourceLimits) admissionDecision {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	processes := int64(limits.MaxProcesses)
-	if p.active >= p.maxConcurrent ||
-		budgetExceeded(p.memoryBytes, limits.MaxMemoryBytes, p.aggregate.MaxMemoryBytes) ||
-		budgetExceeded(p.processes, processes, int64(p.aggregate.MaxProcesses)) ||
-		budgetExceeded(p.outputBytes, limits.MaxOutputBytes, p.aggregate.MaxOutputBytes) ||
-		budgetExceeded(p.milliCPUs, limits.MilliCPUs, p.aggregate.MilliCPUs) {
-		return false
+	processes := int64(request.MaxProcesses)
+	if request.MaxMemoryBytes > p.limits.MaxMemoryBytes {
+		return admissionDecision{status: admissionRequestTooLarge, reason: "memory"}
+	}
+	if processes > int64(p.limits.MaxProcesses) {
+		return admissionDecision{status: admissionRequestTooLarge, reason: "processes"}
+	}
+	if request.MaxOutputBytes > p.limits.MaxOutputBytes {
+		return admissionDecision{status: admissionRequestTooLarge, reason: "output"}
+	}
+	if request.MilliCPUs > p.limits.MilliCPUs {
+		return admissionDecision{status: admissionRequestTooLarge, reason: "cpu"}
+	}
+	if p.active >= p.limits.MaxConcurrent {
+		return admissionDecision{status: admissionBusy, reason: "concurrency"}
+	}
+	if budgetExceeded(p.memoryBytes, request.MaxMemoryBytes, p.limits.MaxMemoryBytes) {
+		return admissionDecision{status: admissionBusy, reason: "memory"}
+	}
+	if budgetExceeded(p.processes, processes, int64(p.limits.MaxProcesses)) {
+		return admissionDecision{status: admissionBusy, reason: "processes"}
+	}
+	if budgetExceeded(p.outputBytes, request.MaxOutputBytes, p.limits.MaxOutputBytes) {
+		return admissionDecision{status: admissionBusy, reason: "output"}
+	}
+	if budgetExceeded(p.milliCPUs, request.MilliCPUs, p.limits.MilliCPUs) {
+		return admissionDecision{status: admissionBusy, reason: "cpu"}
 	}
 
 	p.active++
-	p.memoryBytes += limits.MaxMemoryBytes
+	p.memoryBytes += request.MaxMemoryBytes
 	p.processes += processes
-	p.outputBytes += limits.MaxOutputBytes
-	p.milliCPUs += limits.MilliCPUs
-	return true
+	p.outputBytes += request.MaxOutputBytes
+	p.milliCPUs += request.MilliCPUs
+	return admissionDecision{status: admissionAccepted}
 }
 
-func (p *admissionPool) release(limits sandbox.ResourceLimits) {
+func (p *admissionPool) release(request sandbox.ResourceLimits) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.active--
-	p.memoryBytes -= limits.MaxMemoryBytes
-	p.processes -= int64(limits.MaxProcesses)
-	p.outputBytes -= limits.MaxOutputBytes
-	p.milliCPUs -= limits.MilliCPUs
+	p.memoryBytes -= request.MaxMemoryBytes
+	p.processes -= int64(request.MaxProcesses)
+	p.outputBytes -= request.MaxOutputBytes
+	p.milliCPUs -= request.MilliCPUs
 }
 
-func budgetExceeded(used, requested, maximum int64) bool {
-	return maximum > 0 && (requested > maximum || used > maximum-requested)
-}
-
-// WithMaxConcurrentSandboxes sets the maximum executions for one backend instance.
-func WithMaxConcurrentSandboxes(maximum int) Option {
-	return func(b *Backend) error {
-		if maximum <= 0 {
-			return fmt.Errorf("%w: maximum concurrent sandboxes must be positive", sandbox.ErrInvalidRequest)
-		}
-		b.maxConcurrent = maximum
-		return nil
+func (p *admissionPool) snapshot() reservationStats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return reservationStats{
+		active:      p.active,
+		memoryBytes: p.memoryBytes,
+		processes:   p.processes,
+		outputBytes: p.outputBytes,
+		milliCPUs:   p.milliCPUs,
 	}
 }
 
-// WithAggregateResourceLimits sets optional totals across active executions.
-func WithAggregateResourceLimits(limits sandbox.ResourceLimits) Option {
+func budgetExceeded(used, requested, maximum int64) bool {
+	return requested > maximum || used > maximum-requested
+}
+
+// WithAdmissionLimits sets trusted totals across active executions.
+func WithAdmissionLimits(limits sandbox.AdmissionLimits) Option {
 	return func(b *Backend) error {
-		if limits.MaxMemoryBytes < 0 || limits.MaxProcesses < 0 || limits.MaxOutputBytes < 0 || limits.MilliCPUs < 0 {
-			return fmt.Errorf("%w: aggregate resource limits must not be negative", sandbox.ErrInvalidRequest)
+		normalized, err := normalizeAdmissionLimits(limits)
+		if err != nil {
+			return err
 		}
-		b.aggregateLimits = limits
+		b.admissionLimits = normalized
 		return nil
 	}
 }
