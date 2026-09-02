@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sandbox "github.com/luojiyin1987/Agent-Sandbox-Runtime"
@@ -102,6 +104,19 @@ type Backend struct {
 	allowOutbound     bool
 	allowMutableImage bool
 	run               commandRunner
+	maxConcurrent     int
+	aggregateLimits   sandbox.ResourceLimits
+	admissionOnce     sync.Once
+	admission         *admissionPool
+	logger            *slog.Logger
+	cleanupFailures   atomic.Uint64
+	admissionRejected atomic.Uint64
+}
+
+// Stats contains cumulative backend event counters.
+type Stats struct {
+	CleanupFailures   uint64
+	AdmissionRejected uint64
 }
 
 var _ sandbox.Runtime = (*Backend)(nil)
@@ -116,8 +131,9 @@ func New(image string, options ...Option) (*Backend, error) {
 	}
 
 	backend := &Backend{
-		image: image,
-		run:   runDocker,
+		image:         image,
+		run:           runDocker,
+		maxConcurrent: defaultMaxConcurrentSandboxes,
 	}
 	for _, option := range options {
 		if option == nil {
@@ -173,6 +189,15 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (result 
 		return result, err
 	}
 
+	limits := effectiveResourceLimits(req.Resources)
+	admission := b.admissionController()
+	if !admission.tryAcquire(limits) {
+		b.recordAdmissionRejection(limits)
+		finish()
+		return result, sandbox.ErrTooManyConcurrent
+	}
+	defer admission.release(limits)
+
 	timeout := req.Timeout
 	if timeout == 0 {
 		timeout = defaultTimeout
@@ -217,6 +242,7 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (result 
 	var createOut bytes.Buffer
 	var createErr bytes.Buffer
 	createRunErr := b.run(execCtx, &createOut, &createErr, createArgs(name, b.image, req, workspacePath, envFile, dockerNetwork)...)
+	removeEnvFile()
 	if createRunErr != nil {
 		finish()
 		if contextErr := execCtx.Err(); contextErr != nil {
@@ -231,7 +257,6 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (result 
 		return result, errors.New("docker create returned an empty container ID")
 	}
 
-	limits := effectiveResourceLimits(req.Resources)
 	capture := newOutputCapture(limits.MaxOutputBytes)
 	startErr := b.run(execCtx, capture.stdoutWriter(), capture.stderrWriter(), "start", "--attach", name)
 	result.Stdout, result.Stderr, result.OutputTruncated = capture.snapshot()
@@ -261,6 +286,44 @@ func (b *Backend) Execute(ctx context.Context, req sandbox.ExecRequest) (result 
 	}
 
 	return result, nil
+}
+
+func (b *Backend) admissionController() *admissionPool {
+	b.admissionOnce.Do(func() {
+		b.admission = newAdmissionPool(b.maxConcurrent, b.aggregateLimits)
+	})
+	return b.admission
+}
+
+// WithLogger enables structured backend event logs.
+func WithLogger(logger *slog.Logger) Option {
+	return func(b *Backend) error {
+		if logger == nil {
+			return fmt.Errorf("%w: logger is required", sandbox.ErrInvalidRequest)
+		}
+		b.logger = logger
+		return nil
+	}
+}
+
+// Stats returns a snapshot of cumulative backend counters.
+func (b *Backend) Stats() Stats {
+	return Stats{
+		CleanupFailures:   b.cleanupFailures.Load(),
+		AdmissionRejected: b.admissionRejected.Load(),
+	}
+}
+
+func (b *Backend) recordAdmissionRejection(limits sandbox.ResourceLimits) {
+	b.admissionRejected.Add(1)
+	if b.logger != nil {
+		b.logger.Warn(
+			"Docker sandbox admission rejected",
+			"memory_bytes", limits.MaxMemoryBytes,
+			"processes", limits.MaxProcesses,
+			"milli_cpus", limits.MilliCPUs,
+		)
+	}
 }
 
 func applyCleanup(result *sandbox.ExecResult, retErr *error, cleanup cleanupFunc) {
@@ -342,8 +405,11 @@ func writeEnvironmentFile(env map[string]string) (string, func(), error) {
 		return "", func() {}, fmt.Errorf("create Docker environment file: %w", err)
 	}
 	path := file.Name()
+	var cleanupOnce sync.Once
 	cleanup := func() {
-		_ = os.Remove(path)
+		cleanupOnce.Do(func() {
+			_ = os.Remove(path)
+		})
 	}
 
 	keys := make([]string, 0, len(env))
@@ -415,6 +481,7 @@ func createArgs(name, image string, req sandbox.ExecRequest, workspacePath, envF
 		"--name", name,
 		"--label", executionResourceLabel,
 		"--network", dockerNetwork,
+		"--log-driver", "none",
 		"--read-only",
 		"--user", fmt.Sprintf("%d:%d", os.Geteuid(), os.Getegid()),
 		"--cap-drop", "ALL",
@@ -494,6 +561,7 @@ func (b *Backend) removeContainer(name string) error {
 }
 
 func (b *Backend) removeDockerResource(resourceType, name string, args ...string) error {
+	startedAt := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 
@@ -502,7 +570,18 @@ func (b *Backend) removeDockerResource(resourceType, name string, args ...string
 		if dockerResourceMissing(stderr.String()) {
 			return nil
 		}
-		return fmt.Errorf("%w: remove %s %q: %v%s", ErrCleanup, resourceType, name, err, dockerErrorSuffix(stderr.String()))
+		cleanupErr := fmt.Errorf("%w: remove %s %q: %v%s", ErrCleanup, resourceType, name, err, dockerErrorSuffix(stderr.String()))
+		b.cleanupFailures.Add(1)
+		if b.logger != nil {
+			b.logger.Error(
+				"Docker resource cleanup failed",
+				"resource_type", resourceType,
+				"resource_name", name,
+				"duration", time.Since(startedAt),
+				"error", cleanupErr,
+			)
+		}
+		return cleanupErr
 	}
 	return nil
 }
