@@ -3,11 +3,8 @@ package docker
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 
 	sandbox "github.com/luojiyin1987/Agent-Sandbox-Runtime"
 )
@@ -76,23 +73,9 @@ func (b *Backend) prepareNetwork(ctx context.Context, mode sandbox.NetworkMode) 
 }
 
 func (b *Backend) removeNetwork(name string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-	defer cancel()
-
-	var stderr bytes.Buffer
-	if err := b.run(ctx, io.Discard, &stderr, "network", "rm", name); err != nil {
-		if dockerResourceMissing(stderr.String()) {
-			return nil
-		}
-		return fmt.Errorf("%w: remove network %q: %v%s", ErrCleanup, name, err, dockerErrorSuffix(stderr.String()))
-	}
-	return nil
+	return b.removeDockerResource("network", name, "network", "rm", name)
 }
 
 func networkName() (string, error) {
-	var random [8]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return "", err
-	}
-	return "agent-sandbox-net-" + hex.EncodeToString(random[:]), nil
+	return generateRandomName("agent-sandbox-net-")
 }
