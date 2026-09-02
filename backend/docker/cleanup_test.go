@@ -79,6 +79,9 @@ func TestExecuteReturnsContainerCleanupFailure(t *testing.T) {
 	if got := backend.Stats().CleanupFailures; got != 1 {
 		t.Fatalf("CleanupFailures = %d, want 1", got)
 	}
+	if got := backend.Stats().ActiveExecutions; got != 0 {
+		t.Fatalf("ActiveExecutions = %d, want 0", got)
+	}
 }
 
 func TestCleanupFailureWritesStructuredLog(t *testing.T) {
