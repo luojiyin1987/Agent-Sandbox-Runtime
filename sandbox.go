@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -102,6 +103,11 @@ var ErrInvalidRequest = errors.New("invalid sandbox request")
 func (r ExecRequest) Validate() error {
 	if r.Command == "" {
 		return fmt.Errorf("%w: command is required", ErrInvalidRequest)
+	}
+	for index, arg := range r.Args {
+		if strings.ContainsRune(arg, '\x00') {
+			return fmt.Errorf("%w: argument %d contains a NUL byte", ErrInvalidRequest, index)
+		}
 	}
 	if r.Timeout < 0 {
 		return fmt.Errorf("%w: timeout must not be negative", ErrInvalidRequest)
