@@ -51,10 +51,12 @@ The runtime is designed to contain common Agent-generated workload failures and 
 
 Each Docker or gVisor backend instance allows one active execution by default.
 
-The operator can set a different limit with `WithMaxConcurrentSandboxes`.
-The operator can also set aggregate memory, PID, output, and CPU budgets.
+The default totals are 256 MiB, 64 PIDs, 1 MiB output, and one CPU.
+The operator can change trusted totals with `WithAdmissionLimits`.
+Zero fields retain secure defaults.
 Admission uses the effective request limits, including default values.
 The backend holds each reservation through resource cleanup.
+Requests above trusted totals fail before Docker creates resources.
 
 This control is local to one backend instance.
 Separate processes do not share the same admission pool.
