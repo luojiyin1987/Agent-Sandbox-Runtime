@@ -115,7 +115,10 @@ type ExecResult struct {
 	Termination TerminationReason
 }
 
-var ErrInvalidRequest = errors.New("invalid sandbox request")
+var (
+	ErrInvalidRequest    = errors.New("invalid sandbox request")
+	ErrTooManyConcurrent = errors.New("too many concurrent sandbox executions")
+)
 
 // Validate rejects ambiguous or unsafe request shapes before a backend sees them.
 func (r ExecRequest) Validate() error {
