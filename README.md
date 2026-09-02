@@ -60,8 +60,15 @@ The Docker backend uses one fresh container per execution and requires the Docke
 ```go
 runtime, err := dockerbackend.New(
     "alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce",
-    dockerbackend.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
-    dockerbackend.WithOutboundNetwork(),
+	dockerbackend.WithWorkspaceRoot("/srv/agent-workspaces/session-123"),
+	dockerbackend.WithOutboundNetwork(),
+	dockerbackend.WithMaxConcurrentSandboxes(4),
+	dockerbackend.WithAggregateResourceLimits(sandbox.ResourceLimits{
+		MaxMemoryBytes: 512 << 20,
+		MaxProcesses:   128,
+		MaxOutputBytes: 4 << 20,
+		MilliCPUs:      2000,
+	}),
 )
 if err != nil {
     panic(err)
@@ -115,6 +122,36 @@ Resource fields are independent overrides. A zero field keeps the Docker backend
 | timeout | 30 seconds | execution context + forced cleanup |
 
 Docker requires an explicit memory limit to be at least 6 MiB; smaller non-zero values are rejected before container creation. An OOM-killed container is classified as `TerminationResourceLimit`. Non-zero application exit codes remain ordinary completed workload results.
+
+### Resource admission
+
+Each backend instance allows one active sandbox by default.
+`WithMaxConcurrentSandboxes` sets a different positive limit.
+Excess requests return `sandbox.ErrTooManyConcurrent` without creating Docker resources.
+
+`WithAggregateResourceLimits` sets optional totals for active executions.
+It supports memory, PID, output, and CPU totals.
+Each zero field disables that aggregate dimension.
+Reservations use effective request limits and remain active through cleanup.
+
+The admission pool belongs to one backend instance.
+Multiple runtime processes need an external coordinator or a shared parent cgroup.
+
+### Output and Docker logs
+
+The runtime captures combined stdout and stderr within `MaxOutputBytes`.
+Each container also uses `--log-driver none`.
+This setting prevents Docker from storing an unbounded second output copy.
+Docker and gVisor integration tests verify attached output with this setting.
+
+### Operational events
+
+`WithLogger` accepts a standard `slog.Logger` for structured events.
+Cleanup failures include the resource type, resource name, duration, and error.
+Admission rejections include the requested effective limits.
+
+`Stats` returns cumulative cleanup-failure and admission-rejection counters.
+Metric exporters can sample these counters without parsing logs.
 
 ### Filesystem isolation
 
