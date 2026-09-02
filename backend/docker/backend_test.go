@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -166,6 +167,38 @@ func TestExecuteRejectsEnvironmentFileDelimiters(t *testing.T) {
 	}
 }
 
+func TestExecuteRemovesEnvironmentFileAfterPanic(t *testing.T) {
+	var envFile string
+	backend := &Backend{image: "alpine:3.22", run: func(_ context.Context, _ io.Writer, _ io.Writer, args ...string) error {
+		if args[0] == "create" {
+			envFile, _ = argValue(args, "--env-file")
+			panic("runner panic")
+		}
+		return nil
+	}}
+
+	var recovered any
+	func() {
+		defer func() {
+			recovered = recover()
+		}()
+		_, _ = backend.Execute(context.Background(), sandbox.ExecRequest{
+			Command: "true",
+			Env:     map[string]string{"TOKEN": "secret-value"},
+		})
+	}()
+
+	if recovered == nil {
+		t.Fatal("Execute() did not propagate the runner panic")
+	}
+	if envFile == "" {
+		t.Fatal("Docker create args did not contain an environment file")
+	}
+	if _, err := os.Stat(envFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("environment file still exists after panic: %v", err)
+	}
+}
+
 func TestExecuteCompilesPartialResourceLimits(t *testing.T) {
 	fake := &fakeRunner{
 		exitCode: "0",
@@ -246,6 +279,54 @@ func TestExecuteRejectsTooSmallDockerMemoryBeforeDocker(t *testing.T) {
 	}
 	if calls := fake.snapshotCalls(); len(calls) != 0 {
 		t.Fatalf("docker was called before resource validation: %+v", calls)
+	}
+}
+
+func TestExecuteRejectsMilliCPUsAboveNodeCapacity(t *testing.T) {
+	fake := &fakeRunner{exitCode: "0"}
+	backend := &Backend{image: "alpine:3.22", run: fake.run}
+
+	_, err := backend.Execute(context.Background(), sandbox.ExecRequest{
+		Command: "true",
+		Resources: sandbox.ResourceLimits{
+			MilliCPUs: int64(runtime.NumCPU())*1000 + 1,
+		},
+	})
+	if !errors.Is(err, sandbox.ErrInvalidRequest) {
+		t.Fatalf("Execute() error = %v, want ErrInvalidRequest", err)
+	}
+	if calls := fake.snapshotCalls(); len(calls) != 0 {
+		t.Fatalf("Docker was called before resource validation: %+v", calls)
+	}
+}
+
+func TestInspectStateAcceptsAdditionalFields(t *testing.T) {
+	backend := &Backend{run: func(_ context.Context, stdout, _ io.Writer, _ ...string) error {
+		_, _ = io.WriteString(stdout, "7 true future-field\n")
+		return nil
+	}}
+
+	state, err := backend.inspectState("sandbox")
+	if err != nil {
+		t.Fatalf("inspectState() error = %v", err)
+	}
+	if state.exitCode != 7 || !state.oomKilled {
+		t.Fatalf("inspectState() = %+v", state)
+	}
+}
+
+func TestOutputCaptureDoesNotUnderflowRemaining(t *testing.T) {
+	capture := newOutputCapture(1)
+	writer := capture.stdoutWriter()
+	_, _ = writer.Write([]byte("ab"))
+	_, _ = writer.Write([]byte("c"))
+
+	stdout, _, truncated := capture.snapshot()
+	if string(stdout) != "a" || !truncated {
+		t.Fatalf("snapshot() stdout = %q, truncated = %t", stdout, truncated)
+	}
+	if capture.remaining != 0 {
+		t.Fatalf("remaining = %d, want 0", capture.remaining)
 	}
 }
 
