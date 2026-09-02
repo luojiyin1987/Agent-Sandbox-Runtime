@@ -124,6 +124,7 @@ func TestExecutePreservesWorkloadResult(t *testing.T) {
 	joined := strings.Join(create.args, " ")
 	for _, want := range []string{
 		"--network none",
+		"--log-driver none",
 		"--read-only",
 		"--memory 268435456",
 		"--pids-limit 64",
